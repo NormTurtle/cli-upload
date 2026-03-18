@@ -1,6 +1,6 @@
 import os
-import sys
-import shutil
+import re
+import json
 from pathlib import Path
 
 # Configuration: Files and the variable names to protect
@@ -19,10 +19,9 @@ POST_COMMIT_PY = HOOKS_DIR / "post-commit-logic.py"
 PRE_COMMIT_HOOK = HOOKS_DIR / "pre-commit"
 POST_COMMIT_HOOK = HOOKS_DIR / "post-commit"
 
-PRE_COMMIT_SCRIPT = """import os
+PRE_COMMIT_SCRIPT = r"""import os
 import re
 import json
-import base64
 from pathlib import Path
 
 PROTECTED = {
@@ -46,20 +45,20 @@ def main():
             content = path.read_text(encoding="utf-8")
             # Regex to find variable = "value"
             pattern = rf'({var_name}\s*=\s*")([^"]+)(")'
-            match = re.search(pattern, content)
             
-            if match and match.group(2).strip():
+            if re.search(pattern, content):
                 # Save original for post-commit restoration
                 stash[filename] = content
                 
-                # Replace with placeholder
-                new_content = re.sub(pattern, r'\1\3', content)
+                # Replace with placeholder using \g<1> for robust backreferencing
+                placeholder = rf'\g<1>PASTE_{var_name}_HERE\g<3>'
+                new_content = re.sub(pattern, placeholder, content)
                 path.write_text(new_content, encoding="utf-8")
                 
                 # Re-stage the cleaned file
                 os.system(f'git add "{filename}"')
                 modified_any = True
-                print(f"[Hook] Stripped {var_name} from {filename} for commit.")
+                print(f"[Hook] Stripped {var_name} from {filename} for commit (placeholder used).")
 
     if modified_any:
         existing = {}
@@ -75,7 +74,7 @@ if __name__ == "__main__":
     main()
 """
 
-POST_COMMIT_SCRIPT = """import json
+POST_COMMIT_SCRIPT = r"""import json
 from pathlib import Path
 
 STASH_PATH = Path(".git/hooks/secret_stash.json")

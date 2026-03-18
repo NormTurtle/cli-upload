@@ -3,7 +3,7 @@ import os, sys, json, time, base64, argparse, threading, urllib.request, urllib.
 from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIG ---
-
+USER_HASH = "PASTE_USER_HASH_HERE"
 API_BASE = "https://vikingfile.com/api"
 FILE_THREADS = 4       # Files at once
 CHUNK_THREADS = 4      # Chunks per large file

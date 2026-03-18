@@ -13,7 +13,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 # --- OPTIMIZED CONFIG (aria2-style) ---
-
+TOKEN = "PASTE_TOKEN_HERE"
 FILE_THREADS = 16        # Equivalent to -x16
 CHUNK_SIZE = 1024 * 1024 # 1MB buffer - equivalent to -k1M
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

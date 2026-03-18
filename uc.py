@@ -5,7 +5,7 @@
 # ///
 
 # --- CONFIG ---
-                      # ← paste your 32-char hash here or  ~/.uc_key
+API_KEY           = "PASTE_API_KEY_HERE"                      # ← paste your 32-char hash here or  ~/.uc_key
 API_BASE          = "https://files.union-crax.xyz"
 FILE_THREADS      = 4                       # files uploaded in parallel (folder mode)
 CHUNK_THREADS     = 4                       # chunk upload threads per large file
