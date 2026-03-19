@@ -3,13 +3,12 @@ name: ucf release
 on:
   push:
     tags:
-      - "ucf-v*"   # git tag ucf-v0.0.1 — won't fire on any other repo tags
+      - "ucf-v*"
 
 permissions:
   contents: write
 
 jobs:
-  # ── 1. Build all 4 binaries in parallel ─────────────────────────────────────
   build:
     name: Build · ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
@@ -17,32 +16,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2025
             label: Windows x86_64
             asset: ucf-windows-x86_64.exe
             bin:   dist/ucf.exe
 
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             label: Linux x86_64
             asset: ucf-linux-x86_64
             bin:   dist/ucf
 
-          - os: macos-13          # Intel
+          - os: macos-15-intel
             label: macOS x86_64
             asset: ucf-macos-x86_64
             bin:   dist/ucf
 
-          - os: macos-latest      # Apple Silicon
+          - os: macos-15
             label: macOS arm64
             asset: ucf-macos-arm64
             bin:   dist/ucf
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install build deps
         run: pip install pyinstaller requests
@@ -58,15 +57,17 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
+          if-no-files-found: error
           retention-days: 1
 
-  # ── 2. Create GitHub Release + attach binaries ───────────────────────────────
   release:
     name: GitHub Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v4
         with:
@@ -106,7 +107,7 @@ jobs:
           body: |
             ## ucf v${{ steps.ver.outputs.version }}
 
-            Blazing-fast CLI uploader for [UC Files](https://files.union-crax.xyz).
+            Uploader CLI for [UC Files](https://files.union-crax.xyz).
 
             ---
 
@@ -114,10 +115,10 @@ jobs:
 
             | Platform | File |
             |----------|------|
-            | Windows  | [`ucf-windows-x86_64.exe`] |
-            | Linux    | [`ucf-linux-x86_64`] |
-            | macOS (Apple Silicon) | [`ucf-macos-arm64`] |
-            | macOS (Intel) | [`ucf-macos-x86_64`] |
+            | Windows  | `ucf-windows-x86_64.exe` |
+            | Linux    | `ucf-linux-x86_64` |
+            | macOS (Apple Silicon) | `ucf-macos-arm64` |
+            | macOS (Intel) | `ucf-macos-x86_64` |
 
             **Linux / macOS — mark executable after download:**
             ```bash
@@ -125,17 +126,10 @@ jobs:
             ./ucf-linux-x86_64 video.mp4
             ```
 
-            **Or install via pip / uvx (no binary needed):**
+            **Or install via pip / uvx:**
             ```bash
             pip install ucf
             uvx ucf video.mp4
-            ```
-
-            ---
-
-            ### Usage
-            ```
-            ucf <file|folder|url> [-d FOLDER] [--key KEY]
             ```
 
             ---
@@ -146,25 +140,24 @@ jobs:
             |------|--------|
             ${{ steps.sha.outputs.table }}
 
-            > **Windows:** Defender may flag the `.exe` on first run — known false positive with all PyInstaller tools. Click *More info → Run anyway*, or use `pip install ucf` instead.
+            > **Windows:** Defender may flag the `.exe` on first run — known false positive with PyInstaller builds. Use `pip install ucf` to avoid it.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── 3. Publish to PyPI via OIDC Trusted Publishing ───────────────────────────
   pypi:
     name: Publish to PyPI
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: pypi
     permissions:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - run: pip install build
 
