@@ -18,6 +18,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds between retries
 
 # --- IMPORTS ---
+# ruff: noqa: E402
 import os
 import sys
 import io
@@ -179,14 +180,14 @@ def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
             if resp.status_code == 401:
                 print("\nInvalid API key — delete ~/.uc_key and re-run.")
                 log("FATAL: 401 Unauthorized — API key rejected")
-                sys.exit(1)
+                os._exit(1)
 
             if resp.status_code == 413:
                 print(
                     "\nFile too large for a single chunk — this is a bug, please report it."
                 )
                 log("FATAL: 413 Payload Too Large")
-                sys.exit(1)
+                os._exit(1)
 
             if resp.status_code >= 500:
                 log(
@@ -399,6 +400,8 @@ def _draw_loop():
 
 # --- FOLDER MANAGEMENT ---
 
+folder_lock = threading.Lock()
+
 # maps folder name -> folder url/id (populated by list and create calls)
 folder_urls = {}
 
@@ -406,62 +409,69 @@ folder_urls = {}
 def ensure_folders_cached(session):
     """Fetch the folder list once and populate known_folders set."""
     global _folders_fetched
-    if _folders_fetched:
-        return
-    log("Fetching folder list from API")
-    try:
-        resp = api_request(session, "GET", "/api/folders")
-        data = resp.json()
-        items = []
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = data.get("folders", data.get("data", []))
-        log(f"Found {len(items)} folders on server")
-        for folder in items:
-            if isinstance(folder, dict):
-                name = folder.get("name", "")
-                if name:
-                    known_folders.add(name)
-                    # capture any url/id the API gives us
-                    furl = folder.get("url", folder.get("link", ""))
-                    fid = folder.get("id", folder.get("folder_id", ""))
-                    if furl:
-                        folder_urls[name] = furl
-                    elif fid:
-                        folder_urls[name] = f"{API_BASE}/folder/{fid}"
-        _folders_fetched = True
-    except Exception as exc:
-        log(f"Failed to list folders: {exc}")
+    with folder_lock:
+        if _folders_fetched:
+            return
+        log("Fetching folder list from API")
+        try:
+            resp = api_request(session, "GET", "/api/folders")
+            data = resp.json()
+            items = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = data.get("folders", data.get("data", []))
+            log(f"Found {len(items)} folders on server")
+            for folder in items:
+                if isinstance(folder, dict):
+                    name = folder.get("name", "")
+                    if name:
+                        known_folders.add(name)
+                        # capture any url/id the API gives us
+                        furl = folder.get("url", folder.get("link", ""))
+                        fid = folder.get("id", folder.get("folder_id", ""))
+                        if furl:
+                            folder_urls[name] = furl
+                        elif fid:
+                            folder_urls[name] = f"{API_BASE}/folder/{fid}"
+            _folders_fetched = True
+        except Exception as exc:
+            log(f"Failed to list folders: {exc}")
 
 
 def ensure_folder_exists(session, folder_name):
     """Create a remote folder if it doesn't already exist. Caches results."""
-    if not folder_name or folder_name in known_folders:
+    if not folder_name:
         return
-    ensure_folders_cached(session)
+    # fast path outside lock
     if folder_name in known_folders:
         return
-    log(f"Creating folder: {folder_name}")
-    try:
-        resp = api_request(
-            session,
-            "POST",
-            "/api/folders/create",
-            json={"name": folder_name},
-        )
-        known_folders.add(folder_name)
-        # capture folder url from creation response
-        rdata = resp.json()
-        log(f"Folder create response: {rdata}")
-        furl = rdata.get("url", rdata.get("link", ""))
-        fid = rdata.get("id", rdata.get("folder_id", ""))
-        if furl:
-            folder_urls[folder_name] = furl
-        elif fid:
-            folder_urls[folder_name] = f"{API_BASE}/folder/{fid}"
-    except Exception as exc:
-        log(f"FAIL: create folder '{folder_name}': {exc}")
+        
+    ensure_folders_cached(session)
+    
+    with folder_lock:
+        if folder_name in known_folders:
+            return
+        log(f"Creating folder: {folder_name}")
+        try:
+            resp = api_request(
+                session,
+                "POST",
+                "/api/folders/create",
+                json={"name": folder_name},
+            )
+            known_folders.add(folder_name)
+            # capture folder url from creation response
+            rdata = resp.json()
+            log(f"Folder create response: {rdata}")
+            furl = rdata.get("url", rdata.get("link", ""))
+            fid = rdata.get("id", rdata.get("folder_id", ""))
+            if furl:
+                folder_urls[folder_name] = furl
+            elif fid:
+                folder_urls[folder_name] = f"{API_BASE}/folder/{fid}"
+        except Exception as exc:
+            log(f"FAIL: create folder '{folder_name}': {exc}")
 
 
 # --- UPLOAD: SMALL FILE ---
@@ -473,6 +483,7 @@ def _build_multipart(filename, filepath, file_size, folder=""):
     and track actual network bytes sent (not just file reads buffered in memory).
     Returns (boundary, body_stream) where body_stream is a _MultipartStream.
     """
+    safe_filename = filename.replace('"', '_')
     boundary = f"----UCUpload{secrets.token_hex(16)}"
     parts_header = b""
     # optional folder field
@@ -485,7 +496,7 @@ def _build_multipart(filename, filepath, file_size, folder=""):
     # file field header
     parts_header += (
         f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\r\n'
         f"Content-Type: application/octet-stream\r\n\r\n"
     ).encode()
     parts_footer = f"\r\n--{boundary}--\r\n".encode()
@@ -994,7 +1005,6 @@ def _download_chunk_parallel(session, url, filename, byte_start, byte_end, chunk
         s_start = byte_start + seg_index * seg_size
         s_end = min(byte_start + (seg_index + 1) * seg_size - 1, byte_end)
         local_offset = seg_index * seg_size
-        seg_len = s_end - s_start + 1
 
         for attempt in range(MAX_RETRIES):
             try:
@@ -1053,13 +1063,17 @@ def _fallback_download_and_upload(
     session, url, filename, file_size, folder, folder_mode=False
 ):
     """Download the entire file to a temp location, then upload using normal Mode A logic."""
+    import hashlib
+    file_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+    safe_name = f"{file_hash}_{filename}"
+    
     # pick temp dir: /tmp/uc on linux/mac, cwd on windows
     if sys.platform == "win32":
-        tmp_path = os.path.join(os.getcwd(), filename)
+        tmp_path = os.path.join(os.getcwd(), safe_name)
     else:
         tmp_dir = "/tmp/uc"
         os.makedirs(tmp_dir, exist_ok=True)
-        tmp_path = os.path.join(tmp_dir, filename)
+        tmp_path = os.path.join(tmp_dir, safe_name)
 
     # support resuming a partial download
     existing_size = 0
