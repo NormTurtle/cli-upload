@@ -5,39 +5,50 @@
 # ///
 
 # --- CONFIG ---
-API_KEY           = "PASTE_API_KEY_HERE"                      # ← paste your 32-char hash here or  ~/.uc_key
-API_BASE          = "https://files.union-crax.xyz"
-FILE_THREADS      = 5                       # files uploaded in parallel (folder mode)
-CHUNK_THREADS     = 4                       # chunk upload threads per large file
-DOWNLOAD_CONNS    = 16                      # parallel Range connections when downloading a URL
-CHUNK_SIZE        = 45 * 1024 * 1024        # 45 MB per upload chunk
-MINI_CHUNK_SIZE   = 128 * 1024              # 128 KB read buffer
-MAX_SIMPLE_SIZE   = 50 * 1024 * 1024        # files <= this go through simple upload
-LOG_FILE          = ".uc.log"
-MAX_RETRIES       = 3
-RETRY_DELAY       = 5                       # seconds between retries
+API_KEY = "PASTE_API_KEY_HERE"  # ← paste your 32-char hash here or  ~/.uc_key
+API_BASE = "https://files.union-crax.xyz"
+FILE_THREADS = 5  # files uploaded in parallel (folder mode)
+CHUNK_THREADS = 4  # chunk upload threads per large file
+DOWNLOAD_CONNS = 16  # parallel Range connections when downloading a URL
+CHUNK_SIZE = 45 * 1024 * 1024  # 45 MB per upload chunk
+MINI_CHUNK_SIZE = 128 * 1024  # 128 KB read buffer
+MAX_SIMPLE_SIZE = 50 * 1024 * 1024  # files <= this go through simple upload
+LOG_FILE = ".uc.log"
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds between retries
 
 # --- IMPORTS ---
-import os, sys, io, time, json, math, shutil, argparse, threading, datetime, secrets, stat
+import os
+import sys
+import io
+import time
+import math
+import shutil
+import argparse
+import threading
+import datetime
+import secrets
+import stat
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from requests.adapters import HTTPAdapter
 
-KEY_FILE          = Path.home() / ".uc_key"
+KEY_FILE = Path.home() / ".uc_key"
 
 # --- STATE ---
-progress_lock     = threading.Lock()
-log_lock          = threading.Lock()
-active_uploads    = {}
+progress_lock = threading.Lock()
+log_lock = threading.Lock()
+active_uploads = {}
 global_bytes_done = 0
-is_folder_mode    = False
-progress_active   = False
+is_folder_mode = False
+progress_active = False
 
-known_folders     = set()                    # folders we've already verified/created this run
-_folders_fetched  = False
+known_folders = set()  # folders we've already verified/created this run
+_folders_fetched = False
 
 # --- SETUP (key loading, session creation) ---
+
 
 def load_key(override_key=None):
     """Load the API key from --key flag, ~/.uc_key file, or prompt the user."""
@@ -103,7 +114,9 @@ def auth_headers():
     """Return the auth header dict. Every request needs this."""
     return {"X-API-Key": API_KEY}
 
+
 # --- UTILITIES (log, human_size, human_time, etc.) ---
+
 
 def log(msg):
     """Append a timestamped message to .uc.log cleanly across threads."""
@@ -160,7 +173,7 @@ def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
     for attempt in range(1, retries + 1):
         try:
             resp = session.request(method, url, **kwargs)
-            resp_len = resp.headers.get('Content-Length', '?')
+            resp_len = resp.headers.get("Content-Length", "?")
             log(f"<< {method} {path} -> {resp.status_code} ({resp_len} bytes)")
 
             if resp.status_code == 401:
@@ -169,19 +182,25 @@ def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
                 sys.exit(1)
 
             if resp.status_code == 413:
-                print("\nFile too large for a single chunk — this is a bug, please report it.")
+                print(
+                    "\nFile too large for a single chunk — this is a bug, please report it."
+                )
                 log("FATAL: 413 Payload Too Large")
                 sys.exit(1)
 
             if resp.status_code >= 500:
-                log(f"RETRY: server error {resp.status_code} on {method} {path} (attempt {attempt}), body: {resp.text[:500]}")
+                log(
+                    f"RETRY: server error {resp.status_code} on {method} {path} (attempt {attempt}), body: {resp.text[:500]}"
+                )
                 last_exc = Exception(f"HTTP {resp.status_code}")
                 if attempt < retries:
                     time.sleep(RETRY_DELAY)
                 continue
 
             # log response body for API calls that return JSON (useful for debugging field names)
-            if '/api/' in path and resp.headers.get('content-type', '').startswith('application/json'):
+            if "/api/" in path and resp.headers.get("content-type", "").startswith(
+                "application/json"
+            ):
                 log(f"   response json: {resp.text[:1000]}")
 
             return resp
@@ -199,13 +218,23 @@ def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
 
                 # If the connection pool was poisoned by a network drop,
                 # forcefully bypass the pool completely for this retry.
-                if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError)):
-                    log(f"Bypassing session pool for retry due to connection error: {exc}")
+                if isinstance(
+                    exc,
+                    (
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.ChunkedEncodingError,
+                    ),
+                ):
+                    log(
+                        f"Bypassing session pool for retry due to connection error: {exc}"
+                    )
                     session = requests
 
     raise last_exc
 
+
 # --- PROGRESS BAR ---
+
 
 def _term_width():
     """Get terminal width, fallback to 80 for dumb terminals."""
@@ -226,17 +255,17 @@ def start_progress(filename, total_size, folder_mode=False):
     with progress_lock:
         if progress_active:
             _clear_drawn_lines()
-        
+
         if not progress_active:
             is_folder_mode = folder_mode
             progress_active = True
             t = threading.Thread(target=_draw_loop, daemon=True)
             t.start()
-        
+
         active_uploads[filename] = {
             "done": 0,
             "total": total_size,
-            "start_time": time.time()
+            "start_time": time.time(),
         }
 
 
@@ -246,10 +275,10 @@ def finish_progress(filename, size, url, elapsed=None, speed=None):
         _clear_drawn_lines()
         if filename in active_uploads:
             del active_uploads[filename]
-        
+
         if url and not url.startswith("http"):
             url = f"{API_BASE}{url}"
-        
+
         if is_folder_mode:
             print(f" {ok_symbol()} {filename} [{human_size(size)}]")
         else:
@@ -258,7 +287,7 @@ def finish_progress(filename, size, url, elapsed=None, speed=None):
             print(f" {ok_symbol()} {filename} [{human_size(size)}]")
             if url:
                 print(url)
-            
+
         if not active_uploads:
             progress_active = False
 
@@ -292,10 +321,10 @@ def _draw_loop():
         with progress_lock:
             if not progress_active and not active_uploads:
                 return
-            
+
             if active_uploads:
                 _clear_drawn_lines()
-                
+
                 total_bytes = sum(s["total"] for s in active_uploads.values())
                 done_bytes = sum(s["done"] for s in active_uploads.values())
 
@@ -305,23 +334,23 @@ def _draw_loop():
                     inst_speed = max(0, global_bytes_done - last_global_done) / dt
                     speed_window.append(inst_speed)
                     speed_window = speed_window[-5:]
-                
+
                 last_time = now
                 last_global_done = global_bytes_done
 
                 avg_speed = sum(speed_window) / len(speed_window) if speed_window else 0
-                
+
                 if total_bytes > 0:
                     pct = int(done_bytes / total_bytes * 100)
                 else:
                     pct = 0
-                
+
                 if avg_speed > 0 and total_bytes > 0:
                     eta_secs = max(0, total_bytes - done_bytes) / avg_speed
                     time_str = str(datetime.timedelta(seconds=int(eta_secs)))
                 else:
                     time_str = "--:--"
-                
+
                 # compute best file
                 best_file = ""
                 best_pct = -1
@@ -331,14 +360,14 @@ def _draw_loop():
                         if p > best_pct:
                             best_pct = p
                             best_file = fname
-                
+
                 width = _term_width()
-                
+
                 header_line = f"Uploading: {best_file}"
                 if len(active_uploads) > 1:
-                    header_line += f" (+{len(active_uploads)-1} others)"
+                    header_line += f" (+{len(active_uploads) - 1} others)"
                 if len(header_line) > width - 1:
-                    header_line = header_line[:width-4] + "..."
+                    header_line = header_line[: width - 4] + "..."
                 header_line = header_line.strip()
 
                 speed_str = f"{human_size(avg_speed)}/s"
@@ -350,20 +379,23 @@ def _draw_loop():
                     speed_str = "---"
 
                 base_str = f"[{time_str}] [{speed_str}] [ {pct:>3}%] {header_line} {done_str}/{total_str}"
-                
+
                 bar_len = max(5, (width - 1) - len(base_str))
-                filled = int(bar_len * done_bytes / total_bytes) if total_bytes > 0 else 0
+                filled = (
+                    int(bar_len * done_bytes / total_bytes) if total_bytes > 0 else 0
+                )
                 bar = "#" * filled + "-" * (bar_len - filled)
 
                 line = f"[{time_str}] [{speed_str}] [{bar} {pct:>3}%] {header_line} {done_str}/{total_str}"
-                
+
                 if len(line) > width - 1:
-                    line = line[:width - 1]
-                
+                    line = line[: width - 1]
+
                 sys.stdout.write(f"\r{line}")
                 sys.stdout.flush()
-            
+
         time.sleep(0.2)
+
 
 # --- FOLDER MANAGEMENT ---
 
@@ -413,7 +445,9 @@ def ensure_folder_exists(session, folder_name):
     log(f"Creating folder: {folder_name}")
     try:
         resp = api_request(
-            session, "POST", "/api/folders/create",
+            session,
+            "POST",
+            "/api/folders/create",
             json={"name": folder_name},
         )
         known_folders.add(folder_name)
@@ -429,7 +463,9 @@ def ensure_folder_exists(session, folder_name):
     except Exception as exc:
         log(f"FAIL: create folder '{folder_name}': {exc}")
 
+
 # --- UPLOAD: SMALL FILE ---
+
 
 def _build_multipart(filename, filepath, file_size, folder=""):
     """
@@ -443,18 +479,25 @@ def _build_multipart(filename, filepath, file_size, folder=""):
     if folder:
         parts_header += (
             f"--{boundary}\r\n"
-            f"Content-Disposition: form-data; name=\"folder\"\r\n\r\n"
+            f'Content-Disposition: form-data; name="folder"\r\n\r\n'
             f"{folder}\r\n"
         ).encode()
     # file field header
     parts_header += (
         f"--{boundary}\r\n"
-        f"Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
         f"Content-Type: application/octet-stream\r\n\r\n"
     ).encode()
     parts_footer = f"\r\n--{boundary}--\r\n".encode()
     total_body = len(parts_header) + file_size + len(parts_footer)
-    stream = _MultipartStream(parts_header, open(filepath, "rb"), parts_footer, total_body, file_size, filename)
+    stream = _MultipartStream(
+        parts_header,
+        open(filepath, "rb"),
+        parts_footer,
+        total_body,
+        file_size,
+        filename,
+    )
     return boundary, stream, total_body
 
 
@@ -465,15 +508,18 @@ class _BoundedFile:
         self.original_length = length
         self.f.seek(offset)
         self.remaining = length
-    
+
     def read(self, size=-1):
-        if self.remaining <= 0: return b""
-        if size < 0 or size > self.remaining: size = self.remaining
+        if self.remaining <= 0:
+            return b""
+        if size < 0 or size > self.remaining:
+            size = self.remaining
         chunk = self.f.read(size)
-        if not chunk: return b""
+        if not chunk:
+            return b""
         self.remaining -= len(chunk)
         return chunk
-        
+
     def seek(self, offset):
         if offset != 0:
             raise ValueError("Only seek(0) is supported for bounded retry")
@@ -488,20 +534,22 @@ def _build_multipart_chunk(filename, filepath, upload_id, index, offset, length)
     boundary = f"----UCChunk{secrets.token_hex(16)}{index}"
     parts_header = (
         f"--{boundary}\r\n"
-        f"Content-Disposition: form-data; name=\"upload_id\"\r\n\r\n"
+        f'Content-Disposition: form-data; name="upload_id"\r\n\r\n'
         f"{upload_id}\r\n"
         f"--{boundary}\r\n"
-        f"Content-Disposition: form-data; name=\"index\"\r\n\r\n"
+        f'Content-Disposition: form-data; name="index"\r\n\r\n'
         f"{index}\r\n"
         f"--{boundary}\r\n"
-        f"Content-Disposition: form-data; name=\"chunk\"; filename=\"chunk_{index}\"\r\n"
+        f'Content-Disposition: form-data; name="chunk"; filename="chunk_{index}"\r\n'
         f"Content-Type: application/octet-stream\r\n\r\n"
     ).encode("utf-8")
     parts_footer = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    
+
     total_body = len(parts_header) + length + len(parts_footer)
     file_obj = _BoundedFile(filepath, offset, length)
-    stream = _MultipartStream(parts_header, file_obj, parts_footer, total_body, length, filename)
+    stream = _MultipartStream(
+        parts_header, file_obj, parts_footer, total_body, length, filename
+    )
     return boundary, stream, total_body
 
 
@@ -511,6 +559,7 @@ class _MultipartStream:
     Tracks upload progress via add_progress() on every read() call so progress
     reflects actual bytes sent over the network, not file buffering.
     """
+
     def __init__(self, header, file_obj, footer, total, file_size, filename):
         self._parts = [
             io.BytesIO(header),
@@ -528,9 +577,11 @@ class _MultipartStream:
     def read(self, n=-1):
         """Read n bytes across parts, updating progress for file content bytes."""
         if n is None or n < 0:
-            result = b"".join(p.read() for p in self._parts[self._idx:])
+            result = b"".join(p.read() for p in self._parts[self._idx :])
             self._idx = len(self._parts)
-            file_bytes = max(0, len(result) - max(0, self._header_len - self._bytes_read))
+            file_bytes = max(
+                0, len(result) - max(0, self._header_len - self._bytes_read)
+            )
             if file_bytes > 0:
                 add_progress(self._filename, min(file_bytes, self._file_size))
             self._bytes_read += len(result)
@@ -547,7 +598,7 @@ class _MultipartStream:
                 remaining -= len(chunk)
                 # count only bytes that fall inside the file region
                 file_start = self._header_len
-                file_end   = self._header_len + self._file_size
+                file_end = self._header_len + self._file_size
                 prog = max(0, min(self._bytes_read, file_end) - max(before, file_start))
                 if prog > 0:
                     add_progress(self._filename, prog)
@@ -565,7 +616,11 @@ class _MultipartStream:
             p.seek(0)
         self._idx = 0
         # undo previously reported progress so retries don't double-count
-        file_progress_reported = max(0, min(self._bytes_read, self._header_len + self._file_size) - self._header_len)
+        file_progress_reported = max(
+            0,
+            min(self._bytes_read, self._header_len + self._file_size)
+            - self._header_len,
+        )
         if file_progress_reported > 0:
             add_progress(self._filename, -file_progress_reported)
         self._bytes_read = 0
@@ -588,14 +643,18 @@ def upload_small(session, filepath, folder="", folder_mode=False):
     t0 = time.time()
     try:
         # build multipart body manually so we stream it and track real upload progress
-        boundary, stream, body_len = _build_multipart(filename, filepath, file_size, folder)
+        boundary, stream, body_len = _build_multipart(
+            filename, filepath, file_size, folder
+        )
         try:
             resp = api_request(
-                session, "POST", "/api/upload",
+                session,
+                "POST",
+                "/api/upload",
                 data=stream,
                 headers={
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
-                    "Content-Length": str(body_len)
+                    "Content-Length": str(body_len),
                 },
                 timeout=300,
             )
@@ -609,7 +668,9 @@ def upload_small(session, filepath, folder="", folder_mode=False):
         file_id = result.get("id", result.get("file_id", ""))
         if not url and file_id:
             url = f"{API_BASE}/f/{file_id}"
-        log(f"DONE: {filename} -> {url} in {human_time(elapsed)} at {human_size(avg_speed)}/s")
+        log(
+            f"DONE: {filename} -> {url} in {human_time(elapsed)} at {human_size(avg_speed)}/s"
+        )
         finish_progress(filename, file_size, url, elapsed, avg_speed)
         return url
     except Exception as exc:
@@ -617,18 +678,24 @@ def upload_small(session, filepath, folder="", folder_mode=False):
         fail_progress(filename, exc)
         return None
 
+
 # --- UPLOAD: LARGE FILE (CHUNKED) ---
+
 
 def upload_large(session, filepath, folder="", folder_mode=False):
     """Upload a file > 50 MB using chunked init → chunk uploads → finish → poll."""
     filename = os.path.basename(filepath)
     file_size = os.path.getsize(filepath)
     chunk_count = math.ceil(file_size / CHUNK_SIZE)
-    log(f"UPLOAD LARGE: {filename} ({human_size(file_size)}) -> {chunk_count} chunks, folder={folder!r}")
+    log(
+        f"UPLOAD LARGE: {filename} ({human_size(file_size)}) -> {chunk_count} chunks, folder={folder!r}"
+    )
 
     # step 1: init the chunked upload
     init_resp = api_request(
-        session, "POST", "/api/upload/init",
+        session,
+        "POST",
+        "/api/upload/init",
         json={
             "filename": filename,
             "size": file_size,
@@ -653,7 +720,16 @@ def upload_large(session, filepath, folder="", folder_mode=False):
         for i in range(chunk_count):
             offset = i * CHUNK_SIZE
             length = min(CHUNK_SIZE, file_size - offset)
-            fut = pool.submit(_upload_one_chunk, session, filepath, filename, upload_id, i, offset, length)
+            fut = pool.submit(
+                _upload_one_chunk,
+                session,
+                filepath,
+                filename,
+                upload_id,
+                i,
+                offset,
+                length,
+            )
             futures.append(fut)
 
         for fut in as_completed(futures):
@@ -667,7 +743,9 @@ def upload_large(session, filepath, folder="", folder_mode=False):
 
     # step 3: finish
     finish_resp = api_request(
-        session, "POST", "/api/upload/finish",
+        session,
+        "POST",
+        "/api/upload/finish",
         json={"upload_id": upload_id},
     )
     finish_data = finish_resp.json()
@@ -686,16 +764,20 @@ def upload_large(session, filepath, folder="", folder_mode=False):
 
 def _upload_one_chunk(session, filepath, filename, upload_id, index, offset, length):
     """Read one chunk from disk and POST it to /api/upload/chunk smoothly."""
-    boundary, stream, body_len = _build_multipart_chunk(filename, filepath, upload_id, index, offset, length)
+    boundary, stream, body_len = _build_multipart_chunk(
+        filename, filepath, upload_id, index, offset, length
+    )
 
     # retry wrapper is inside api_request already
     try:
         api_request(
-            session, "POST", "/api/upload/chunk",
+            session,
+            "POST",
+            "/api/upload/chunk",
             data=stream,
             headers={
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "Content-Length": str(body_len)
+                "Content-Length": str(body_len),
             },
             timeout=120,
         )
@@ -708,7 +790,9 @@ def _poll_until_ready(session, file_id, max_wait=300):
     deadline = time.time() + max_wait
     while time.time() < deadline:
         try:
-            resp = api_request(session, "GET", f"/api/upload/status?id={file_id}", retries=1)
+            resp = api_request(
+                session, "GET", f"/api/upload/status?id={file_id}", retries=1
+            )
             data = resp.json()
             status = data.get("status", "")
             if status == "ready":
@@ -722,7 +806,9 @@ def _poll_until_ready(session, file_id, max_wait=300):
     log(f"Poll timed out after {max_wait}s for {file_id}")
     return None
 
+
 # --- DOWNLOAD + UPLOAD: URL MODE ---
+
 
 def process_url(session, url, folder="", folder_mode=False):
     """Download a remote file and upload it to UC Files simultaneously."""
@@ -734,7 +820,9 @@ def process_url(session, url, folder="", folder_mode=False):
         _pipe_upload(session, url, filename, file_size, folder, folder_mode)
     else:
         # fallback: download the whole file first, then upload normally
-        _fallback_download_and_upload(session, url, filename, file_size, folder, folder_mode)
+        _fallback_download_and_upload(
+            session, url, filename, file_size, folder, folder_mode
+        )
 
 
 def _ext_from_content_type(content_type):
@@ -795,6 +883,7 @@ def _probe_url(session, url):
 def _filename_from_url(url):
     """Extract a filename from a URL path."""
     from urllib.parse import urlparse, unquote
+
     path = urlparse(url).path
     name = unquote(os.path.basename(path))
     return name if name else "download"
@@ -810,7 +899,9 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
 
     # init chunked upload
     init_resp = api_request(
-        session, "POST", "/api/upload/init",
+        session,
+        "POST",
+        "/api/upload/init",
         json={
             "filename": filename,
             "size": file_size,
@@ -841,13 +932,17 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
         sem.acquire()
 
         # download chunk i using parallel mini-segments
-        chunk_data = _download_chunk_parallel(session, url, filename, byte_start, byte_end, chunk_len)
+        chunk_data = _download_chunk_parallel(
+            session, url, filename, byte_start, byte_end, chunk_len
+        )
         if chunk_data is None:
             fail_progress(filename, f"Failed to download chunk {i}")
             return
 
         # upload chunk i in background while we start downloading chunk i+1
-        fut = upload_pool.submit(_upload_pipe_chunk, session, upload_id, i, chunk_data, sem)
+        fut = upload_pool.submit(
+            _upload_pipe_chunk, session, upload_id, i, chunk_data, sem
+        )
         upload_futures.append(fut)
 
     # wait for all uploads to finish and check for failures
@@ -867,7 +962,9 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
 
     # finish
     finish_resp = api_request(
-        session, "POST", "/api/upload/finish",
+        session,
+        "POST",
+        "/api/upload/finish",
         json={"upload_id": upload_id},
     )
     finish_data = finish_resp.json()
@@ -875,7 +972,9 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
     file_id = finish_data.get("id", finish_data.get("file_id", upload_id))
     result_url = _poll_until_ready(session, file_id)
     if not result_url:
-        result_url = finish_data.get("url", finish_data.get("link", f"{API_BASE}/f/{file_id}"))
+        result_url = finish_data.get(
+            "url", finish_data.get("link", f"{API_BASE}/f/{file_id}")
+        )
 
     elapsed = time.time() - t0
     avg_speed = file_size / elapsed if elapsed > 0 else 0
@@ -908,12 +1007,16 @@ def _download_chunk_parallel(session, url, filename, byte_start, byte_end, chunk
                 received = 0
                 for piece in resp.iter_content(chunk_size=MINI_CHUNK_SIZE):
                     n = len(piece)
-                    chunk_data[local_offset + received : local_offset + received + n] = piece
+                    chunk_data[
+                        local_offset + received : local_offset + received + n
+                    ] = piece
                     received += n
                     add_progress(filename, n)
                 return True
             except Exception as exc:
-                log(f"Segment download error (seg {seg_index}, attempt {attempt+1}): {exc}")
+                log(
+                    f"Segment download error (seg {seg_index}, attempt {attempt + 1}): {exc}"
+                )
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY)
         return False
@@ -932,7 +1035,9 @@ def _upload_pipe_chunk(session, upload_id, index, chunk_data, sem):
     """Upload a single chunk and release the semaphore when done."""
     try:
         api_request(
-            session, "POST", "/api/upload/chunk",
+            session,
+            "POST",
+            "/api/upload/chunk",
             files={"chunk": (f"chunk_{index}", chunk_data, "application/octet-stream")},
             data={"upload_id": upload_id, "index": str(index)},
             timeout=120,
@@ -944,7 +1049,9 @@ def _upload_pipe_chunk(session, upload_id, index, chunk_data, sem):
         sem.release()
 
 
-def _fallback_download_and_upload(session, url, filename, file_size, folder, folder_mode=False):
+def _fallback_download_and_upload(
+    session, url, filename, file_size, folder, folder_mode=False
+):
     """Download the entire file to a temp location, then upload using normal Mode A logic."""
     # pick temp dir: /tmp/uc on linux/mac, cwd on windows
     if sys.platform == "win32":
@@ -994,7 +1101,9 @@ def _fallback_download_and_upload(session, url, filename, file_size, folder, fol
     except OSError:
         pass
 
+
 # --- ORCHESTRATOR (process_file, process_url, process_folder) ---
+
 
 def process_file(session, filepath, folder="", folder_mode=False):
     """Decide whether to use small or chunked upload for a local file."""
@@ -1045,7 +1154,9 @@ def process_folder(session, folder_path, dest_folder=""):
         ensure_folder_exists(session, rd)
 
     total_size = sum(os.path.getsize(f[0]) for f in to_upload)
-    log(f"FOLDER: {len(to_upload)} files, {human_size(total_size)}, dest={dest_folder!r}")
+    log(
+        f"FOLDER: {len(to_upload)} files, {human_size(total_size)}, dest={dest_folder!r}"
+    )
     print(f"Uploading {len(to_upload)} file(s) ({human_size(total_size)})\n")
 
     t0_folder = time.time()
@@ -1067,12 +1178,16 @@ def process_folder(session, folder_path, dest_folder=""):
     if folder_link and not folder_link.startswith("http"):
         folder_link = f"{API_BASE}{folder_link}"
 
-    log(f"FOLDER DONE: {target_folder} [{human_size(total_size)}] in {human_time(elapsed)} at {human_size(avg_speed)}/s, link={folder_link!r}")
+    log(
+        f"FOLDER DONE: {target_folder} [{human_size(total_size)}] in {human_time(elapsed)} at {human_size(avg_speed)}/s, link={folder_link!r}"
+    )
     print(f"{target_folder} [{human_size(total_size)}] - {human_time(elapsed)}")
     if folder_link:
         print(folder_link)
 
+
 # --- MAIN (argparse, entrypoint) ---
+
 
 def main():
     global API_KEY
@@ -1088,9 +1203,15 @@ def main():
             "  uv run uc.py big_folder/ -d Backup\n"
         ),
     )
-    parser.add_argument("target", nargs="?", help="Local file, local folder, or remote URL")
-    parser.add_argument("-d", dest="folder", default="", help="Destination folder on UC Files")
-    parser.add_argument("--key", dest="key", default=None, help="Override API key for this session")
+    parser.add_argument(
+        "target", nargs="?", help="Local file, local folder, or remote URL"
+    )
+    parser.add_argument(
+        "-d", dest="folder", default="", help="Destination folder on UC Files"
+    )
+    parser.add_argument(
+        "--key", dest="key", default=None, help="Override API key for this session"
+    )
     args = parser.parse_args()
 
     if not args.target:
@@ -1140,6 +1261,7 @@ def main():
 if __name__ == "__main__":
     if sys.platform == "win32":
         import ctypes
+
         try:
             kernel32 = ctypes.windll.kernel32
             kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
