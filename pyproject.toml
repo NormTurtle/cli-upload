@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ucf"
+version = "0.0.1"
+description = "Blazing-fast CLI uploader for UC Files"
+readme = "README.md"
+license = { text = "Unlicense" }
+requires-python = ">=3.9"
+dependencies = ["requests>=2.28"]
+keywords = ["upload", "file-sharing", "cli", "uc-files"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: The Unlicense (Unlicense)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+ucf = "uc:main"
+
+[project.urls]
+Homepage = "https://github.com/NormTurtle/cli-upload"
+Repository = "https://github.com/NormTurtle/cli-upload"
+Issues = "https://github.com/NormTurtle/cli-upload/issues"
+
+[tool.setuptools]
+# packages only uc.py — gofile.py, viking.py, pre_commit.py are untouched
+py-modules = ["uc"]
