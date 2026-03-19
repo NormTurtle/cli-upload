@@ -1,53 +1,52 @@
-# CLI File Uploaders
+# CLI File Uploaders (ucf v0.0.1)
 
-- [Union Crax (UC)](#uc)
+- [Union Crax (UCF)](#uc)
 - [Viking / Gofile](#viking--gofile)
-- [Git Hook / Dev Setup](#git-hook--dev-setup)
+- [Pre-commit & Setup](#pre-commit-git-hook--dev-setup)
 
 ---
 
 ## UC
-High-speed CLI for [union-crax.xyz](https://files.union-crax.xyz).
+Now available as the `ucf` package. The fastest CLI for [union-crax.xyz](https://files.union-crax.xyz).
 
-### Installation & Usage
+### Quick Start
+Run instantly without installation using `uvx`:
 ```bash
-pip install uv
-# Run directly from GitHub
-uv run https://github.com/NormTurtle/cli-upload/raw/refs/heads/main/uc.py file.zip --key "YOUR_KEY"
+# Upload a file
+uvx ucf file.zip --key "YOUR_KEY"
+
+# Upload to a specific folder
+uvx ucf movie.mp4 -d "Movies"
 ```
 
-<img src="docx/uc-info.webp" align="right" width="350">
+<img src="docx/ucf-help.webp" align="right" width="450">
 
 ### Features & Flags
-- **Upload File**: `python uc.py video.mp4`
-- **Upload Folder**: `uv run uc.py ./movies -d Films`
-- **Remote URL**: `uv run uc.py "https://link.com/file.zip" -d Downloads`
-- **API Key**: Pass via `--key KEY` or let it prompt and save to `~/.uc_key`.
+- **Target Mode**: Supports files, folders, and remote URLs.
+- **Auto-Config**: Saves your key to `~/.uc_key` on first run.
+- **One-Liner**: `uvx ucf https://link.com/file.zip -d Downloads`
 
 <br clear="right"/>
 
 ---
 
 ## Viking / Gofile
-CLI tools for [VikingFile](https://vikingfile.com) and [Gofile](https://gofile.io). Both scripts support recursive folder uploads and real-time progress bars.
+CLI tools for [VikingFile](https://vikingfile.com) and [Gofile](https://gofile.io).
 
-### Gofile Usage
-Upload files or entire folders to the fastest available regional server:
+### Usage Example
 ```bash
+# Gofile
 uv run https://github.com/NormTurtle/cli-upload/raw/refs/heads/main/gofile.py target_path
-```
 
-### Viking Usage
-High-speed chunked uploader for VikingFile.
-```bash
-uv run https://github.com/NormTurtle/cli-upload/raw/refs/heads/main/viking.py target_path [--verbose]
+# Viking
+uv run https://github.com/NormTurtle/cli-upload/raw/refs/heads/main/viking.py target_path -v
 ```
 
 ---
 
 
 <details>
-<summary><b>Pre commit git-hook / Setup</b></summary>
+<summary><b>Pre-commit & Setup</b></summary>
 
 ### Key Protection & Hook Setup
 Prevent accidental leaks by installing the local git hooks:

@@ -1206,14 +1206,25 @@ def process_folder(session, folder_path, dest_folder=""):
 def main():
     global API_KEY
 
+    prog_name = os.path.basename(sys.argv[0])
+    if prog_name == "uc.py":
+        prog_name = "python uc.py"
+    elif prog_name == "__main__.py":
+        prog_name = "python -m uc"
+    elif "uv" in sys.argv[0] and "cache" in sys.argv[0]:
+        prog_name = "uvx ucf"
+    else:
+        prog_name = "ucf"
+
     parser = argparse.ArgumentParser(
+        prog=prog_name,
         description="uc.py — blazing-fast CLI uploader for UC Files (files.union-crax.xyz)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
             "  python uc.py video.mp4\n"
-            "  python uc.py /home/user/movies -d Films\n"
-            "  python uc.py https://example.com/archive.zip -d Downloads\n"
+            "  uvx ucf /home/user/movies -d Films\n"
+            "  uvx ucf https://example.com/archive.zip -d Downloads\n"
             "  uv run uc.py big_folder/ -d Backup\n"
         ),
     )
