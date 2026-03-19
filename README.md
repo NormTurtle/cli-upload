@@ -19,7 +19,7 @@ uvx ucf file.zip --key "YOUR_KEY"
 uvx ucf movie.mp4 -d "Movies"
 ```
 
-<img src="docx/ucf-help.webp" align="right" width="450">
+<img src="docx/ucf-help.webp" align="right" width="600">
 
 ### Features & Flags
 - **Target Mode**: Supports files, folders, and remote URLs.

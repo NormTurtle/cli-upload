@@ -17,6 +17,9 @@ LOG_FILE = ".uc.log"
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds between retries
 
+__version__ = "0.0.2"
+
+
 # --- IMPORTS ---
 # ruff: noqa: E402
 import os
@@ -1237,6 +1240,37 @@ def main():
     parser.add_argument(
         "--key", dest="key", default=None, help="Override API key for this session"
     )
+    
+    def _get_version_string():
+        v = __version__
+        try:
+            from importlib.metadata import version
+            v = version("ucf")
+        except Exception:
+            pass
+        
+        try:
+            import subprocess
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if os.path.isdir(os.path.join(script_dir, ".git")):
+                hash_out = subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"], 
+                    cwd=script_dir, stderr=subprocess.DEVNULL, text=True
+                ).strip()
+                date_out = subprocess.check_output(
+                    ["git", "show", "-s", "--format=%cs", "HEAD"], 
+                    cwd=script_dir, stderr=subprocess.DEVNULL, text=True
+                ).strip()
+                if hash_out and date_out:
+                    return f"%(prog)s {v} ({hash_out} {date_out})"
+        except Exception:
+            pass
+        return f"%(prog)s {v}"
+
+    parser.add_argument(
+        "-v", "--version", action="version", version=_get_version_string()
+    )
+
     args = parser.parse_args()
 
     if not args.target:
