@@ -18,7 +18,7 @@ MAX_RETRIES       = 3
 RETRY_DELAY       = 5                       # seconds between retries
 
 # --- IMPORTS ---
-import os, sys, io, time, json, math, shutil, argparse, threading, datetime
+import os, sys, io, time, json, math, shutil, argparse, threading, datetime, secrets, stat
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -28,10 +28,12 @@ KEY_FILE          = Path.home() / ".uc_key"
 
 # --- STATE ---
 progress_lock     = threading.Lock()
+log_lock          = threading.Lock()
 active_uploads    = {}
 global_bytes_done = 0
 is_folder_mode    = False
 progress_active   = False
+
 known_folders     = set()                    # folders we've already verified/created this run
 _folders_fetched  = False
 
@@ -78,16 +80,22 @@ def validate_key(session, key):
 
 
 def save_key(key):
-    """Persist a validated key to ~/.uc_key."""
+    """Persist a validated key to ~/.uc_key with restrictive permissions."""
     KEY_FILE.write_text(key)
+    try:
+        KEY_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600 — owner-only
+    except OSError:
+        pass  # Windows doesn't support Unix permissions
 
 
 def make_session():
     """Build a requests.Session with large connection pools for threading."""
     session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=3)
+    # max_retries=0 here — api_request() handles retries to avoid double-retry (adapter × manual)
+    adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=0)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    session.headers["User-Agent"] = "uc-cli/1.0"
     return session
 
 
@@ -98,10 +106,11 @@ def auth_headers():
 # --- UTILITIES (log, human_size, human_time, etc.) ---
 
 def log(msg):
-    """Append a timestamped message to .uc.log in the current directory."""
+    """Append a timestamped message to .uc.log cleanly across threads."""
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        with log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     except Exception:
         pass  # never crash because of logging
 
@@ -151,7 +160,8 @@ def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
     for attempt in range(1, retries + 1):
         try:
             resp = session.request(method, url, **kwargs)
-            log(f"<< {method} {path} -> {resp.status_code} ({len(resp.content)} bytes)")
+            resp_len = resp.headers.get('Content-Length', '?')
+            log(f"<< {method} {path} -> {resp.status_code} ({resp_len} bytes)")
 
             if resp.status_code == 401:
                 print("\nInvalid API key — delete ~/.uc_key and re-run.")
@@ -181,6 +191,17 @@ def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
             last_exc = exc
             if attempt < retries:
                 time.sleep(RETRY_DELAY)
+                if "data" in kwargs and hasattr(kwargs["data"], "seek"):
+                    try:
+                        kwargs["data"].seek(0)
+                    except Exception as e:
+                        log(f"Stream seek failed: {e}")
+
+                # If the connection pool was poisoned by a network drop,
+                # forcefully bypass the pool completely for this retry.
+                if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError)):
+                    log(f"Bypassing session pool for retry due to connection error: {exc}")
+                    session = requests
 
     raise last_exc
 
@@ -206,8 +227,6 @@ def start_progress(filename, total_size, folder_mode=False):
         if progress_active:
             _clear_drawn_lines()
         
-        print(f" -> {filename}")
-
         if not progress_active:
             is_folder_mode = folder_mode
             progress_active = True
@@ -275,6 +294,8 @@ def _draw_loop():
                 return
             
             if active_uploads:
+                _clear_drawn_lines()
+                
                 total_bytes = sum(s["total"] for s in active_uploads.values())
                 done_bytes = sum(s["done"] for s in active_uploads.values())
 
@@ -301,24 +322,45 @@ def _draw_loop():
                 else:
                     time_str = "--:--"
                 
+                # compute best file
+                best_file = ""
+                best_pct = -1
+                for fname, stats in active_uploads.items():
+                    if stats["total"] > 0:
+                        p = stats["done"] / stats["total"]
+                        if p > best_pct:
+                            best_pct = p
+                            best_file = fname
+                
+                width = _term_width()
+                
+                header_line = f"Uploading: {best_file}"
+                if len(active_uploads) > 1:
+                    header_line += f" (+{len(active_uploads)-1} others)"
+                if len(header_line) > width - 1:
+                    header_line = header_line[:width-4] + "..."
+                header_line = header_line.strip()
+
                 speed_str = f"{human_size(avg_speed)}/s"
                 done_str = human_size(done_bytes)
                 total_str = human_size(total_bytes)
 
-                base_str = f"[{time_str}] [{speed_str}] [ {pct:>3}%] {done_str} / {total_str}"
-                width = _term_width()
-                bar_len = max(5, (width - 1) - len(base_str))
+                if done_bytes >= total_bytes and total_bytes > 0:
+                    time_str = "Finalizing"
+                    speed_str = "---"
 
+                base_str = f"[{time_str}] [{speed_str}] [ {pct:>3}%] {header_line} {done_str}/{total_str}"
+                
+                bar_len = max(5, (width - 1) - len(base_str))
                 filled = int(bar_len * done_bytes / total_bytes) if total_bytes > 0 else 0
                 bar = "#" * filled + "-" * (bar_len - filled)
 
-                line = f"\r[{time_str}] [{speed_str}] [{bar} {pct:>3}%] {done_str} / {total_str}"
+                line = f"[{time_str}] [{speed_str}] [{bar} {pct:>3}%] {header_line} {done_str}/{total_str}"
                 
-                # safety truncate over width
-                if len(line) > width:
-                    line = line[:width]
+                if len(line) > width - 1:
+                    line = line[:width - 1]
                 
-                sys.stdout.write(line)
+                sys.stdout.write(f"\r{line}")
                 sys.stdout.flush()
             
         time.sleep(0.2)
@@ -395,7 +437,7 @@ def _build_multipart(filename, filepath, file_size, folder=""):
     and track actual network bytes sent (not just file reads buffered in memory).
     Returns (boundary, body_stream) where body_stream is a _MultipartStream.
     """
-    boundary = f"----UCUpload{int(time.time() * 1000)}"
+    boundary = f"----UCUpload{secrets.token_hex(16)}"
     parts_header = b""
     # optional folder field
     if folder:
@@ -419,6 +461,8 @@ def _build_multipart(filename, filepath, file_size, folder=""):
 class _BoundedFile:
     def __init__(self, filepath, offset, length):
         self.f = open(filepath, "rb")
+        self.original_offset = offset
+        self.original_length = length
         self.f.seek(offset)
         self.remaining = length
     
@@ -430,12 +474,18 @@ class _BoundedFile:
         self.remaining -= len(chunk)
         return chunk
         
+    def seek(self, offset):
+        if offset != 0:
+            raise ValueError("Only seek(0) is supported for bounded retry")
+        self.f.seek(self.original_offset)
+        self.remaining = self.original_length
+
     def close(self):
         self.f.close()
 
 
 def _build_multipart_chunk(filename, filepath, upload_id, index, offset, length):
-    boundary = f"----UCChunk{int(time.time() * 1000)}{index}"
+    boundary = f"----UCChunk{secrets.token_hex(16)}{index}"
     parts_header = (
         f"--{boundary}\r\n"
         f"Content-Disposition: form-data; name=\"upload_id\"\r\n\r\n"
@@ -508,6 +558,18 @@ class _MultipartStream:
     def __len__(self):
         return self._total
 
+    def seek(self, offset):
+        if offset != 0:
+            raise ValueError("Only seek(0) is supported for stream retry")
+        for p in self._parts:
+            p.seek(0)
+        self._idx = 0
+        # undo previously reported progress so retries don't double-count
+        file_progress_reported = max(0, min(self._bytes_read, self._header_len + self._file_size) - self._header_len)
+        if file_progress_reported > 0:
+            add_progress(self._filename, -file_progress_reported)
+        self._bytes_read = 0
+
     def close(self):
         for p in self._parts:
             try:
@@ -527,16 +589,18 @@ def upload_small(session, filepath, folder="", folder_mode=False):
     try:
         # build multipart body manually so we stream it and track real upload progress
         boundary, stream, body_len = _build_multipart(filename, filepath, file_size, folder)
-        resp = api_request(
-            session, "POST", "/api/upload",
-            data=stream,
-            headers={
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "Content-Length": str(body_len)
-            },
-            timeout=300,
-        )
-        stream.close()
+        try:
+            resp = api_request(
+                session, "POST", "/api/upload",
+                data=stream,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(body_len)
+                },
+                timeout=300,
+            )
+        finally:
+            stream.close()
         elapsed = time.time() - t0
         avg_speed = file_size / elapsed if elapsed > 0 else 0
         result = resp.json()
@@ -625,16 +689,18 @@ def _upload_one_chunk(session, filepath, filename, upload_id, index, offset, len
     boundary, stream, body_len = _build_multipart_chunk(filename, filepath, upload_id, index, offset, length)
 
     # retry wrapper is inside api_request already
-    api_request(
-        session, "POST", "/api/upload/chunk",
-        data=stream,
-        headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Content-Length": str(body_len)
-        },
-        timeout=120,
-    )
-    stream.close()
+    try:
+        api_request(
+            session, "POST", "/api/upload/chunk",
+            data=stream,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(body_len)
+            },
+            timeout=120,
+        )
+    finally:
+        stream.close()
 
 
 def _poll_until_ready(session, file_id, max_wait=300):
@@ -704,8 +770,8 @@ def _probe_url(session, url):
 
         content_type = resp.headers.get("Content-Type", "")
 
-        # accept ranges
-        if resp.headers.get("Accept-Ranges", "").lower() != "none":
+        # accept ranges — only trust explicit "bytes" (absent header ≠ support)
+        if resp.headers.get("Accept-Ranges", "").lower() == "bytes":
             supports_range = True
 
         # filename from Content-Disposition
@@ -713,7 +779,7 @@ def _probe_url(session, url):
         if "filename=" in cd:
             parts = cd.split("filename=")[-1].strip().strip('"').strip("'")
             if parts:
-                filename = parts
+                filename = os.path.basename(parts)  # sanitize: strip path traversal
 
         if "." not in filename:
             ext = _ext_from_content_type(content_type)
@@ -760,19 +826,7 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
         return
 
     t0 = time.time()
-    start_progress(filename, file_size)
-
-    # semaphore limits memory: at most 2 chunks buffered at once
-    sem = threading.Semaphore(2)
-    upload_pool = ThreadPoolExecutor(max_workers=2)
-    upload_futures = []
-
-    for i in range(chunk_count):
-        byte_start = i * CHUNK_SIZE
-        byte_end = min((i + 1) * CHUNK_SIZE, file_size) - 1
-        chunk_len = byte_end - byte_start + 1
-
-        sem.acquire()
+    start_progress(filename, file_size, folder_mode)
 
     # semaphore limits memory: at most 2 chunks buffered at once
     sem = threading.Semaphore(2)
@@ -796,11 +850,20 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
         fut = upload_pool.submit(_upload_pipe_chunk, session, upload_id, i, chunk_data, sem)
         upload_futures.append(fut)
 
-    # wait for all uploads to finish
+    # wait for all uploads to finish and check for failures
+    pipe_failed = False
     for fut in upload_futures:
-        fut.result()
+        try:
+            fut.result()
+        except Exception as exc:
+            log(f"Pipe upload future error: {exc}")
+            pipe_failed = True
 
     upload_pool.shutdown(wait=True)
+
+    if pipe_failed:
+        fail_progress(filename, "Some pipe chunks failed. Check log.")
+        return
 
     # finish
     finish_resp = api_request(
@@ -876,6 +939,7 @@ def _upload_pipe_chunk(session, upload_id, index, chunk_data, sem):
         )
     except Exception as exc:
         log(f"Pipe chunk {index} upload failed: {exc}")
+        raise  # propagate so the caller can detect failure
     finally:
         sem.release()
 
@@ -903,6 +967,7 @@ def _fallback_download_and_upload(session, url, filename, file_size, folder, fol
     display_total = file_size if file_size else 0
     start_progress(dl_name, display_total if display_total else 1)
 
+    downloaded_bytes = 0
     try:
         resp = session.get(url, headers=dl_headers, stream=True, timeout=60)
         resp.raise_for_status()
@@ -911,13 +976,14 @@ def _fallback_download_and_upload(session, url, filename, file_size, folder, fol
         with open(tmp_path, mode) as f:
             for piece in resp.iter_content(chunk_size=MINI_CHUNK_SIZE):
                 f.write(piece)
+                downloaded_bytes += len(piece)
                 add_progress(dl_name, len(piece))
     except Exception as exc:
         log(f"Fallback download failed for {url}: {exc}")
         fail_progress(dl_name, exc)
         return
 
-    finish_progress(dl_name, existing_size + display_total, "")
+    finish_progress(dl_name, existing_size + downloaded_bytes, "")
 
     # now upload normally
     process_file(session, tmp_path, folder, folder_mode)
@@ -1085,9 +1151,11 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         with progress_lock:
             pass
-        import os
+        sys.stdout.flush()
+        sys.stderr.flush()
         os._exit(0)
     except Exception as exc:
         log(f"Unhandled exception: {exc}")
-        import os
+        sys.stdout.flush()
+        sys.stderr.flush()
         os._exit(1)
