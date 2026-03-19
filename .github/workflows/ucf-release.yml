@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     name: Build · ${{ matrix.label }}
@@ -24,11 +27,6 @@ jobs:
           - os: ubuntu-24.04
             label: Linux x86_64
             asset: ucf-linux-x86_64
-            bin:   dist/ucf
-
-          - os: macos-15-intel
-            label: macOS x86_64
-            asset: ucf-macos-x86_64
             bin:   dist/ucf
 
           - os: macos-15
@@ -79,31 +77,12 @@ jobs:
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#ucf-v}" >> "$GITHUB_OUTPUT"
 
-      - name: Compute SHA256 checksums
-        id: sha
-        shell: bash
-        run: |
-          cd dist
-          sha256sum ucf-* > ../SHA256SUMS.txt
-          cat ../SHA256SUMS.txt
-          {
-            echo 'table<<EOF'
-            while IFS= read -r line; do
-              hash=$(awk '{print $1}' <<< "$line")
-              file=$(awk '{print $2}' <<< "$line")
-              echo "| \`$file\` | \`$hash\` |"
-            done < ../SHA256SUMS.txt
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: "ucf v${{ steps.ver.outputs.version }}"
-          files: |
-            dist/ucf-*
-            SHA256SUMS.txt
+          files: dist/ucf-*
           body: |
             ## ucf v${{ steps.ver.outputs.version }}
 
@@ -118,7 +97,6 @@ jobs:
             | Windows  | `ucf-windows-x86_64.exe` |
             | Linux    | `ucf-linux-x86_64` |
             | macOS (Apple Silicon) | `ucf-macos-arm64` |
-            | macOS (Intel) | `ucf-macos-x86_64` |
 
             **Linux / macOS — mark executable after download:**
             ```bash
@@ -131,14 +109,6 @@ jobs:
             pip install ucf
             uvx ucf video.mp4
             ```
-
-            ---
-
-            ### SHA256 checksums
-
-            | File | SHA256 |
-            |------|--------|
-            ${{ steps.sha.outputs.table }}
 
             > **Windows:** Defender may flag the `.exe` on first run — known false positive with PyInstaller builds. Use `pip install ucf` to avoid it.
         env:
