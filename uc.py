@@ -234,6 +234,14 @@ def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
     raise last_exc
 
 
+def _safe_json(resp):
+    """Safely decode JSON from a response, returning an empty dict on error."""
+    try:
+        return resp.json()
+    except ValueError:
+        log(f"JSON decode error on {resp.url} (status {resp.status_code}): {resp.text[:500]}")
+        return {}
+
 # --- PROGRESS BAR ---
 
 
@@ -415,7 +423,7 @@ def ensure_folders_cached(session):
         log("Fetching folder list from API")
         try:
             resp = api_request(session, "GET", "/api/folders")
-            data = resp.json()
+            data = _safe_json(resp)
             items = []
             if isinstance(data, list):
                 items = data
@@ -462,7 +470,7 @@ def ensure_folder_exists(session, folder_name):
             )
             known_folders.add(folder_name)
             # capture folder url from creation response
-            rdata = resp.json()
+            rdata = _safe_json(resp)
             log(f"Folder create response: {rdata}")
             furl = rdata.get("url", rdata.get("link", ""))
             fid = rdata.get("id", rdata.get("folder_id", ""))
@@ -673,7 +681,7 @@ def upload_small(session, filepath, folder="", folder_mode=False):
             stream.close()
         elapsed = time.time() - t0
         avg_speed = file_size / elapsed if elapsed > 0 else 0
-        result = resp.json()
+        result = _safe_json(resp)
         log(f"Upload response: {result}")
         url = result.get("url", result.get("link", ""))
         file_id = result.get("id", result.get("file_id", ""))
@@ -714,7 +722,7 @@ def upload_large(session, filepath, folder="", folder_mode=False):
             "folder": folder,
         },
     )
-    init_data = init_resp.json()
+    init_data = _safe_json(init_resp)
     upload_id = init_data.get("upload_id", init_data.get("uploadId", ""))
     if not upload_id:
         log(f"Chunked init failed — no upload_id returned: {init_data}")
@@ -759,7 +767,7 @@ def upload_large(session, filepath, folder="", folder_mode=False):
         "/api/upload/finish",
         json={"upload_id": upload_id},
     )
-    finish_data = finish_resp.json()
+    finish_data = _safe_json(finish_resp)
 
     # step 4: poll until ready
     file_id = finish_data.get("id", finish_data.get("file_id", upload_id))
@@ -804,7 +812,7 @@ def _poll_until_ready(session, file_id, max_wait=300):
             resp = api_request(
                 session, "GET", f"/api/upload/status?id={file_id}", retries=1
             )
-            data = resp.json()
+            data = _safe_json(resp)
             status = data.get("status", "")
             if status == "ready":
                 return data.get("url", data.get("link", ""))
@@ -920,7 +928,7 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
             "folder": folder,
         },
     )
-    init_data = init_resp.json()
+    init_data = _safe_json(init_resp)
     upload_id = init_data.get("upload_id", init_data.get("uploadId", ""))
     if not upload_id:
         log(f"Pipe init failed: {init_data}")
@@ -978,7 +986,7 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
         "/api/upload/finish",
         json={"upload_id": upload_id},
     )
-    finish_data = finish_resp.json()
+    finish_data = _safe_json(finish_resp)
 
     file_id = finish_data.get("id", finish_data.get("file_id", upload_id))
     result_url = _poll_until_ready(session, file_id)
