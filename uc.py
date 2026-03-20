@@ -30,6 +30,7 @@ import threading
 import datetime
 import secrets
 import stat
+import getpass
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -64,7 +65,7 @@ def load_key(override_key=None):
 
 def prompt_key():
     """Ask the user for their API key and validate it."""
-    key = input("UC Files API Key (32-char hash): ").strip()
+    key = getpass.getpass("UC Files API Key (32-char hash): ").strip()
     if not key:
         print("No key provided. Exiting.")
         sys.exit(1)
