@@ -1138,23 +1138,25 @@ def process_folder(session, folder_path, dest_folder=""):
     # build list of (local_path, remote_folder) tuples
     to_upload = []
     for root, _dirs, files in os.walk(folder_path):
+        # OPTIMIZATION: Calculate directory-relative paths once per folder
+        # instead of redundantly for every single file in the directory.
+        rel_dir = os.path.relpath(root, folder_path)
+
+        if dest_folder:
+            if rel_dir == ".":
+                remote_folder = dest_folder
+            else:
+                remote_folder = f"{dest_folder}/{rel_dir}".replace("\\", "/")
+        else:
+            if rel_dir == ".":
+                remote_folder = base_name
+            else:
+                remote_folder = f"{base_name}/{rel_dir}".replace("\\", "/")
+
         for fname in files:
             if fname == LOG_FILE:
                 continue
             local_path = os.path.join(root, fname)
-            rel_dir = os.path.relpath(root, folder_path)
-
-            if dest_folder:
-                if rel_dir == ".":
-                    remote_folder = dest_folder
-                else:
-                    remote_folder = f"{dest_folder}/{rel_dir}".replace("\\", "/")
-            else:
-                if rel_dir == ".":
-                    remote_folder = base_name
-                else:
-                    remote_folder = f"{base_name}/{rel_dir}".replace("\\", "/")
-
             to_upload.append((local_path, remote_folder))
 
     if not to_upload:

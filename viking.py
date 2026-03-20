@@ -168,10 +168,14 @@ if __name__ == "__main__":
     else:
         folder_name = os.path.basename(os.path.normpath(target_path))
         for r, _, fs in os.walk(target_path):
+            # OPTIMIZATION: Calculate directory-relative paths once per folder
+            # instead of redundantly for every single file in the directory.
+            rel = os.path.relpath(r, target_path)
+            remote_folder = folder_name if rel == "." else os.path.join(folder_name, rel)
+
             for f in fs:
                 if f in [sys.argv[0], LOG_FILE] or ".viking_session" in f: continue
-                rel = os.path.relpath(r, target_path)
-                to_upload.append((os.path.join(r, f), folder_name if rel == "." else os.path.join(folder_name, rel)))
+                to_upload.append((os.path.join(r, f), remote_folder))
 
     total_size = sum(os.path.getsize(f[0]) for f in to_upload)
     threading.Thread(target=draw_progress, args=(total_size,), daemon=True).start()
