@@ -1,0 +1,3 @@
+## 2024-05-18 - Thread Lock Contention on Progress Updates
+**Learning:** In highly parallel multi-part stream uploads, updating the global progress counter (which acquires a threading Lock) on every small `read()` block (e.g., 8KB) creates severe lock contention. The time spent blocked on the progress lock dominates the actual file reading.
+**Action:** When implementing progress tracking in streams parsed by external libraries like `requests`, accumulate the byte counts in a local buffer and only flush to the global locked counter when a reasonable threshold is reached (e.g., 256KB) or at EOF/close. This dramatically increases stream throughput.
