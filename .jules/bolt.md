@@ -1,0 +1,3 @@
+## 2024-05-24 - Batching Progress Updates Reduces Lock Contention
+**Learning:** In highly concurrent upload scripts (like `uc.py`), sending progress updates to a global, thread-safe counter (e.g. `add_progress`) on every tiny 8KB stream chunk can cause massive lock contention and severely bottleneck performance. The `requests` library reads from file-like objects in small chunks when streaming.
+**Action:** Always buffer these progress bytes locally in the stream wrapper (`_MultipartStream` or similar) and flush them to the global lock only when they exceed a reasonable threshold (like 512 KB), and ensure you flush any remaining bytes at the end of the stream.
