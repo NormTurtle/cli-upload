@@ -10,6 +10,7 @@ LOG_FILE = ".uc.log"  # default is .uc.log
 KEY_FILE = "~/.uc_key"  # default is ~/.uc_key
 RESUME_DIR = ""  # defaults to tempdir if empty
 API_BASE = "https://files.union-crax.xyz"
+VERSION = "0.1.1"  # current app version
 FILE_THREADS = 5  # files uploaded in parallel (folder mode)
 CHUNK_THREADS = 3  # chunk upload threads per large file (reduced to avoid 503 saturation)
 DOWNLOAD_CONNS = 16  # parallel Range connections when downloading a URL
@@ -1370,6 +1371,7 @@ def main():
     parser.add_argument(
         "--resume-dir", default=RESUME_DIR, help="Directory for folder-resume state files"
     )
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {VERSION}")
     resume_group = parser.add_mutually_exclusive_group()
     resume_group.add_argument(
         "-r",
