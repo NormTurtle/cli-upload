@@ -5,7 +5,7 @@
 # ///
 
 # --- CONFIG ---
-API_KEY = "PASTE_API_KEY_HERE"  # ← paste your 32-char hash here or  ~/.uc_key
+API_KEY = ""  # ← paste your 32-char hash here or  ~/.uc_key
 LOG_FILE = ".uc.log"  # default is .uc.log
 KEY_FILE = "~/.uc_key"  # default is ~/.uc_key
 RESUME_DIR = ""  # default to /tmp, dir to store uploaded file name/count
@@ -23,6 +23,7 @@ RETRY_DELAY = 5  # seconds between retries
 # --- IMPORTS ---
 # ruff: noqa: E402
 import argparse
+import getpass
 import datetime
 import hashlib
 import io
@@ -60,9 +61,14 @@ _detected_chunk_limit_lock = threading.Lock()
 
 
 def load_key(override_key=None):
-    """Load the API key from --key flag, ~/.uc_key file, or prompt the user."""
+    """Load the API key from --key flag, UC_API_KEY env, ~/.uc_key file, or prompt the user."""
     if override_key:
         return override_key.strip()
+
+    env_key = os.environ.get("UC_API_KEY")
+    if env_key:
+        return env_key.strip()
+
     key_path = Path(os.path.expanduser(KEY_FILE))
     if key_path.exists():
         key = key_path.read_text().strip()
@@ -73,7 +79,7 @@ def load_key(override_key=None):
 
 def prompt_key():
     """Ask the user for their API key and validate it."""
-    key = input("UC Files API Key (32-char hash): ").strip()
+    key = getpass.getpass("UC Files API Key (32-char hash): ").strip()
     if not key:
         print("No key provided. Exiting.")
         sys.exit(1)
