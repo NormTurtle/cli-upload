@@ -10,7 +10,7 @@ LOG_FILE = ".uc.log"  # default is .uc.log
 KEY_FILE = "~/.uc_key"  # default is ~/.uc_key
 RESUME_DIR = ""  # default to /tmp, dir to store uploaded file name/count
 API_BASE = "https://files.union-crax.xyz"
-VERSION = "0.1.2"  # current app version
+VERSION = "0.1.3"  # current app version
 FILE_THREADS = 5  # files uploaded in parallel (folder mode)
 CHUNK_THREADS = 3  # chunk upload threads per large file (reduced to avoid 503 saturation)
 DOWNLOAD_CONNS = 16  # parallel Range connections when downloading a URL
@@ -714,7 +714,10 @@ def upload_small(session, filepath, folder="", folder_mode=False):
             stream.close()
         elapsed = time.time() - t0
         avg_speed = file_size / elapsed if elapsed > 0 else 0
-        result = resp.json()
+        try:
+            result = resp.json()
+        except ValueError:
+            raise Exception(f"HTTP {resp.status_code} Non-JSON response: {resp.text[:500]}")
         log(f"Upload response: {result}")
         url = result.get("url", result.get("link", ""))
         file_id = result.get("id", result.get("file_id", ""))
@@ -777,7 +780,10 @@ def _init_chunked_upload(session, filename, file_size, folder):
         )
 
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
             upload_id = data.get("upload_id", data.get("uploadId", ""))
             if upload_id:
                 return upload_id, chunk_size, chunk_count, data
@@ -853,7 +859,10 @@ def upload_large(session, filepath, folder="", folder_mode=False):
         "/api/upload/finish",
         json={"upload_id": upload_id},
     )
-    finish_data = finish_resp.json()
+    try:
+        finish_data = finish_resp.json()
+    except ValueError:
+        raise Exception(f"HTTP {finish_resp.status_code} on finish: {finish_resp.text[:500]}")
 
     # step 4: use finish URL directly (best throughput), poll only if URL is missing
     file_id = finish_data.get("id", finish_data.get("file_id", ""))
@@ -1068,7 +1077,10 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
         "/api/upload/finish",
         json={"upload_id": upload_id},
     )
-    finish_data = finish_resp.json()
+    try:
+        finish_data = finish_resp.json()
+    except ValueError:
+        raise Exception(f"HTTP {finish_resp.status_code} on pipe finish: {finish_resp.text[:500]}")
 
     file_id = finish_data.get("id", finish_data.get("file_id", ""))
     fallback_url = finish_data.get("url", finish_data.get("link", ""))
