@@ -434,7 +434,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    global LOG_FILE, KEY_FILE, RESUME_DIR
     LOG_FILE = args.log_file
     KEY_FILE = args.key_file
     RESUME_DIR = args.resume_dir or tempfile.gettempdir()
