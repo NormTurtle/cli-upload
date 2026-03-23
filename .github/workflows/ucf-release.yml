@@ -83,11 +83,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "ucf v${{ steps.ver.outputs.version }}"
           files: dist/ucf-*
+          generate_release_notes: true
+          append_body: true
           body: |
-            ## ucf v${{ steps.ver.outputs.version }}
-
-            Uploader CLI for [UC Files](https://files.union-crax.xyz).
-
             ---
 
             ### Download
