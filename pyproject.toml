@@ -31,3 +31,23 @@ Issues = "https://github.com/NormTurtle/cli-upload/issues"
 [tool.setuptools]
 # packages only uc.py — gofile.py, viking.py, pre_commit.py are untouched
 py-modules = ["uc"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+ignore = []
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.7",
+]
