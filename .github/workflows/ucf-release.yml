@@ -81,23 +81,24 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "ucf v${{ steps.ver.outputs.version }}"
+          name: "${{ github.ref_name }}"
           files: dist/ucf-*
           generate_release_notes: true
           append_body: true
           body: |
-            ---
+            <div align="center">
 
             ### Download
 
             | Platform | File |
             |----------|------|
-            | Windows  | `ucf-windows-x86_64.exe` |
-            | Linux    | `ucf-linux-x86_64` |
-            | macOS (Apple Silicon) | `ucf-macos-arm64` |
+            | Windows  | [`ucf-windows-x86_64.exe`](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ucf-windows-x86_64.exe) |
+            | Linux    | [`ucf-linux-x86_64`](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ucf-linux-x86_64) |
+            | macOS (Apple Silicon) | [`ucf-macos-arm64`](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ucf-macos-arm64) |
 
-            **Linux / macOS — mark executable after download:**
+            **Linux / macOS — download and run:**
             ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ucf-linux-x86_64
             chmod +x ucf-linux-x86_64
             ./ucf-linux-x86_64 video.mp4
             ```
@@ -109,6 +110,8 @@ jobs:
             ```
 
             > **Windows:** Defender may flag the `.exe` on first run — known false positive with PyInstaller builds. Use `pip install ucf` to avoid it.
+
+            </div>
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
