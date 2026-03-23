@@ -56,19 +56,23 @@ def test_extract_public_share_token():
     assert extract_public_share_token("  https://vikingfile.com/public-upload/token789  ") == "token789"
     assert extract_public_share_token("  raw_token_abc  ") == "raw_token_abc"
 
-def test_should_skip():
-    # Test normal files
-    assert should_skip("normal_file.txt") == False
-    assert should_skip("/path/to/normal_file.txt") == False
-
-    # Test LOG_FILE
-    assert should_skip(LOG_FILE) == True
-    assert should_skip(f"/var/log/{LOG_FILE}") == True
-
-    # Test viking session
-    assert should_skip(".viking_session") == True
-    assert should_skip(".viking_session_123") == True
-    assert should_skip("/path/to/.viking_session_abc") == True
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        # Test normal files
+        ("normal_file.txt", False),
+        ("/path/to/normal_file.txt", False),
+        # Test LOG_FILE
+        (LOG_FILE, True),
+        (f"/var/log/{LOG_FILE}", True),
+        # Test viking session
+        (".viking_session", True),
+        (".viking_session_123", True),
+        ("/path/to/.viking_session_abc", True),
+    ],
+)
+def test_should_skip(path, expected):
+    assert should_skip(path) == expected
 
 def test_resume_state_path():
     folder_path = "/my/test/folder"
