@@ -19,7 +19,7 @@ from pathlib import Path
 DEFAULT_USER_HASH = "PASTE_USER_HASH_HERE"
 LOG_FILE = ".viking_logs"  # default is .viking_logs
 KEY_FILE = "~/.viking_key"  # default is ~/.viking_key
-RESUME_DIR = None  # default resume state directory
+RESUME_DIR = None  # default to /tmp, dir to store uploaded file name/count
 DEFAULT_PUBLIC_UPLOAD_URL = (
     "https://vikingfile.com/public-upload/F3lH1nC3TR9S9syBWbgSxmUmA1G2ord_Czvw4_pBSas"
 )

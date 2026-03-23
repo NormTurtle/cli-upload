@@ -22,7 +22,7 @@ DEFAULT_ACCOUNT_ID = "926d12a4-9287-437d-8579-35ed1d800761"
 DEFAULT_TOKEN = "PASTE_TOKEN_HERE"
 LOG_FILE = ".gofile_upload.log"  # default is .gofile_upload.log
 KEY_FILE = "~/.gofile_key"  # default is ~/.gofile_key
-RESUME_DIR = None  # default resume state directory
+RESUME_DIR = None  # default to /tmp, dir to store uploaded file name/count
 DEFAULT_UPLOAD_HOST = "upload.gofile.io"
 FALLBACK_UPLOAD_HOSTS = [
     "upload.gofile.io",
