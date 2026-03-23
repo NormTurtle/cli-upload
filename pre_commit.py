@@ -1,14 +1,8 @@
 import os
-import re
-import json
 from pathlib import Path
 
 # Configuration: Files and the variable names to protect
-PROTECTED_FILES = {
-    "gofile.py": "TOKEN",
-    "uc.py": "API_KEY",
-    "viking.py": "USER_HASH"
-}
+PROTECTED_FILES = {"gofile.py": "TOKEN", "uc.py": "API_KEY", "viking.py": "USER_HASH"}
 
 HOOKS_DIR = Path(".git/hooks")
 STASH_FILE = HOOKS_DIR / "secret_stash.json"
@@ -100,6 +94,7 @@ SHELL_WRAPPER = """#!/bin/sh
 python3 .git/hooks/{script_name}
 """
 
+
 def setup():
     if not Path(".git").exists():
         print("Error: Not a git repository.")
@@ -113,8 +108,12 @@ def setup():
     POST_COMMIT_PY.write_text(POST_COMMIT_SCRIPT, encoding="utf-8")
 
     # Write shell hooks
-    PRE_COMMIT_HOOK.write_text(SHELL_WRAPPER.format(script_name="pre-commit-logic.py"), encoding="utf-8")
-    POST_COMMIT_HOOK.write_text(SHELL_WRAPPER.format(script_name="post-commit-logic.py"), encoding="utf-8")
+    PRE_COMMIT_HOOK.write_text(
+        SHELL_WRAPPER.format(script_name="pre-commit-logic.py"), encoding="utf-8"
+    )
+    POST_COMMIT_HOOK.write_text(
+        SHELL_WRAPPER.format(script_name="post-commit-logic.py"), encoding="utf-8"
+    )
 
     # Make executable (friendly for Linux/WSL/Git Bash)
     for hook in [PRE_COMMIT_HOOK, POST_COMMIT_HOOK]:
@@ -125,6 +124,7 @@ def setup():
 
     print("✅ Git hooks installed successfully!")
     print("Locked files: gofile.py, uc.py, viking.py")
+
 
 if __name__ == "__main__":
     setup()
