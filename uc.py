@@ -10,7 +10,7 @@ LOG_FILE = ".uc.log"  # default is .uc.log
 KEY_FILE = "~/.uc_key"  # default is ~/.uc_key
 RESUME_DIR = ""  # default to /tmp, dir to store uploaded file name/count
 API_BASE = "https://files.union-crax.xyz"
-VERSION = "0.1.3"  # current app version
+VERSION = "0.1.4"  # current app version
 FILE_THREADS = 5  # files uploaded in parallel (folder mode)
 CHUNK_THREADS = 3  # chunk upload threads per large file (reduced to avoid 503 saturation)
 DOWNLOAD_CONNS = 16  # parallel Range connections when downloading a URL
@@ -1410,8 +1410,10 @@ def main():
 
     # load or prompt for key
     API_KEY = load_key(args.key)
+    was_prompted = False
     if not API_KEY:
         API_KEY = prompt_key()
+        was_prompted = True
 
     if not validate_key(session, API_KEY):
         print("Invalid API key. Please check and try again.")
@@ -1419,9 +1421,9 @@ def main():
 
     # save key: always persist a validated key, whether from --key or from first prompt
     key_path = Path(os.path.expanduser(KEY_FILE))
-    if args.key or not key_path.exists():
+    if args.key or was_prompted or not key_path.exists() or key_path.stat().st_size == 0:
         save_key(API_KEY)
-        print(f"`{key_path.resolve()}`")
+        print(f"Key verified and saved to `{key_path.resolve()}`")
 
     target = args.target
     folder = args.folder

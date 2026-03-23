@@ -441,9 +441,11 @@ if __name__ == "__main__":
 
     if args.user is None:
         key_path = os.path.expanduser(KEY_FILE)
-        if os.path.exists(key_path):
+        if os.path.exists(key_path) and os.path.getsize(key_path) > 0:
             with open(key_path, "r") as f:
                 args.user = f.read().strip()
+            if not args.user:
+                args.user = DEFAULT_USER_HASH
         else:
             args.user = DEFAULT_USER_HASH
             with open(key_path, "w") as f:
