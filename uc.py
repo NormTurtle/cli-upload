@@ -8,6 +8,7 @@
 API_KEY = "PASTE_API_KEY_HERE"  # ← paste your 32-char hash here or  ~/.uc_key
 LOG_FILE = ".uc.log"  # default is .uc.log
 KEY_FILE = "~/.uc_key"  # default is ~/.uc_key
+RESUME_DIR = ""  # defaults to tempdir if empty
 API_BASE = "https://files.union-crax.xyz"
 FILE_THREADS = 5  # files uploaded in parallel (folder mode)
 CHUNK_THREADS = 3  # chunk upload threads per large file (reduced to avoid 503 saturation)
