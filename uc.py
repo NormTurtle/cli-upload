@@ -1337,7 +1337,7 @@ def process_folder(session, folder_path, dest_folder="", resume=True):
 
 
 def main():
-    global API_KEY
+    global API_KEY, LOG_FILE, KEY_FILE, RESUME_DIR
 
     prog_name = os.path.basename(sys.argv[0])
     if prog_name == "uc.py":
@@ -1382,7 +1382,6 @@ def main():
     )
     args = parser.parse_args()
 
-    global LOG_FILE, KEY_FILE, RESUME_DIR
     LOG_FILE = args.log_file
     KEY_FILE = args.key_file
     RESUME_DIR = args.resume_dir or tempfile.gettempdir()
