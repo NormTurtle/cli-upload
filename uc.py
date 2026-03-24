@@ -24,6 +24,7 @@ RETRY_DELAY = 5  # seconds between retries
 # ruff: noqa: E402
 import argparse
 import datetime
+import getpass
 import hashlib
 import io
 import json
@@ -73,7 +74,9 @@ def load_key(override_key=None):
 
 def prompt_key():
     """Ask the user for their API key and validate it."""
-    key = input("UC Files API Key (32-char hash): ").strip()
+    # Use getpass instead of input() to prevent the API key from
+    # being exposed on screen or saved in terminal history.
+    key = getpass.getpass("UC Files API Key (32-char hash): ").strip()
     if not key:
         print("No key provided. Exiting.")
         sys.exit(1)
