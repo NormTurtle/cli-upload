@@ -414,7 +414,15 @@ def _draw_loop():
 
                 width = _term_width()
 
-                header_line = f"Uploading: {best_file}"
+                is_only_downloading = all(
+                    f.startswith("(downloading) ") for f in active_uploads
+                )
+                verb = "Downloading" if is_only_downloading else "Uploading"
+                best_file_display = (
+                    best_file[14:] if best_file.startswith("(downloading) ") else best_file
+                )
+
+                header_line = f"{verb}: {best_file_display}"
                 if len(active_uploads) > 1:
                     header_line += f" (+{len(active_uploads) - 1} others)"
                 if len(header_line) > width - 1:
@@ -687,9 +695,10 @@ class _MultipartStream:
                 pass
 
 
-def upload_small(session, filepath, folder="", folder_mode=False):
+def upload_small(session, filepath, folder="", folder_mode=False, filename=None):
     """Upload a file <= 50 MB using the simple POST /api/upload endpoint."""
-    filename = os.path.basename(filepath)
+    if filename is None:
+        filename = os.path.basename(filepath)
     file_size = os.path.getsize(filepath)
 
     log(f"UPLOAD SMALL: {filename} ({human_size(file_size)}) -> folder={folder!r}")
@@ -802,9 +811,10 @@ def _init_chunked_upload(session, filename, file_size, folder):
     raise RuntimeError("Chunk init failed after adaptive retry")
 
 
-def upload_large(session, filepath, folder="", folder_mode=False):
+def upload_large(session, filepath, folder="", folder_mode=False, filename=None):
     """Upload a file > 50 MB using chunked init → chunk uploads → finish → poll."""
-    filename = os.path.basename(filepath)
+    if filename is None:
+        filename = os.path.basename(filepath)
     file_size = os.path.getsize(filepath)
 
     # step 1: init the chunked upload
@@ -983,6 +993,15 @@ def _probe_url(session, url):
         # accept ranges — only trust explicit "bytes" (absent header ≠ support)
         if resp.headers.get("Accept-Ranges", "").lower() == "bytes":
             supports_range = True
+        elif file_size:
+            # test for range support with a 1-byte request
+            try:
+                r_test = session.get(url, headers={"Range": "bytes=0-0"}, timeout=5, stream=True)
+                r_test.close()
+                if r_test.status_code == 206:
+                    supports_range = True
+            except Exception:
+                pass
 
         # filename from Content-Disposition
         cd = resp.headers.get("Content-Disposition", "")
@@ -1183,25 +1202,59 @@ def _fallback_download_and_upload(session, url, filename, file_size, folder, fol
     start_progress(dl_name, display_total if display_total else 1)
 
     downloaded_bytes = 0
-    try:
-        resp = session.get(url, headers=dl_headers, stream=True, timeout=60)
-        resp.raise_for_status()
+    aria2_success = False
 
-        mode = "ab" if existing_size > 0 else "wb"
-        with open(tmp_path, mode) as f:
-            for piece in resp.iter_content(chunk_size=MINI_CHUNK_SIZE):
-                f.write(piece)
-                downloaded_bytes += len(piece)
-                add_progress(dl_name, len(piece))
-    except Exception as exc:
-        log(f"Fallback download failed for {url}: {exc}")
-        fail_progress(dl_name, exc)
-        return
+    import shutil
+    import subprocess
+
+    # Attempt ultra-fast aria2 download if uvx is available and starting fresh
+    if existing_size == 0 and shutil.which("uvx"):
+        try:
+            cmd = [
+                "uvx",
+                "--from",
+                "aria2",
+                "aria2c",
+                "-c",
+                "-x16",
+                "-s16",
+                "-k1M",
+                "--min-split-size=1M",
+                "--file-allocation=none",
+                "-d",
+                tmp_dir,
+                "-o",
+                safe_name,
+                url,
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0 and os.path.exists(tmp_path):
+                aria2_success = True
+                downloaded_bytes = os.path.getsize(tmp_path)
+                add_progress(dl_name, downloaded_bytes)
+        except Exception as exc:
+            log(f"aria2 fallback failed: {exc}")
+
+    if not aria2_success:
+        try:
+            resp = session.get(url, headers=dl_headers, stream=True, timeout=60)
+            resp.raise_for_status()
+
+            mode = "ab" if existing_size > 0 else "wb"
+            with open(tmp_path, mode) as f:
+                for piece in resp.iter_content(chunk_size=MINI_CHUNK_SIZE):
+                    f.write(piece)
+                    downloaded_bytes += len(piece)
+                    add_progress(dl_name, len(piece))
+        except Exception as exc:
+            log(f"Fallback download failed for {url}: {exc}")
+            fail_progress(dl_name, exc)
+            return
 
     finish_progress(dl_name, existing_size + downloaded_bytes, "")
 
     # now upload normally
-    process_file(session, tmp_path, folder, folder_mode)
+    process_file(session, tmp_path, folder, folder_mode, filename)
 
     # clean up temp file
     try:
@@ -1213,15 +1266,15 @@ def _fallback_download_and_upload(session, url, filename, file_size, folder, fol
 # --- ORCHESTRATOR (process_file, process_url, process_folder) ---
 
 
-def process_file(session, filepath, folder="", folder_mode=False):
+def process_file(session, filepath, folder="", folder_mode=False, filename=None):
     """Decide whether to use small or chunked upload for a local file."""
     file_size = os.path.getsize(filepath)
     if folder:
         ensure_folder_exists(session, folder)
     if file_size <= MAX_SIMPLE_SIZE:
-        return upload_small(session, filepath, folder, folder_mode)
+        return upload_small(session, filepath, folder, folder_mode, filename)
     else:
-        return upload_large(session, filepath, folder, folder_mode)
+        return upload_large(session, filepath, folder, folder_mode, filename)
 
 
 def process_folder(session, folder_path, dest_folder="", resume=True):
@@ -1254,9 +1307,9 @@ def process_folder(session, folder_path, dest_folder="", resume=True):
 
             if dest_folder:
                 if rel_dir == ".":
-                    remote_folder = dest_folder
+                    remote_folder = f"{dest_folder}/{base_name}".replace("\\", "/")
                 else:
-                    remote_folder = f"{dest_folder}/{rel_dir}".replace("\\", "/")
+                    remote_folder = f"{dest_folder}/{base_name}/{rel_dir}".replace("\\", "/")
             else:
                 if rel_dir == ".":
                     remote_folder = base_name

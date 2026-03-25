@@ -352,7 +352,7 @@ def main():
     key_path = os.path.expanduser(KEY_FILE)
     if args.token is None:
         if os.path.exists(key_path):
-            with open(key_path, "r") as f:
+            with open(key_path) as f:
                 args.token = f.read().strip()
         else:
             args.token = DEFAULT_TOKEN
