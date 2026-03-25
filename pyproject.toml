@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ucf"
-version = "0.1.5"
+version = "0.1.6"
 description = "Blazing-fast CLI uploader for UC Files"
 readme = "README.md"
 license = { text = "Unlicense" }
