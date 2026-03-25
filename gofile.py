@@ -316,7 +316,7 @@ def normalize_hosts(primary_host, include_fallbacks):
 
 
 def main():
-    global start_time
+    global start_time, LOG_FILE, KEY_FILE, RESUME_DIR
 
     parser = argparse.ArgumentParser(description="Upload file/folder to GoFile")
     parser.add_argument("target", help="File or folder to upload")
@@ -344,7 +344,6 @@ def main():
     )
     args = parser.parse_args()
 
-    global LOG_FILE, KEY_FILE, RESUME_DIR
     LOG_FILE = args.log_file
     KEY_FILE = args.key_file
     RESUME_DIR = args.resume_dir or tempfile.gettempdir()
