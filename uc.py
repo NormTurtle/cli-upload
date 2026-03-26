@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.9"
-# dependencies = ["requests"]
+# dependencies = ["requests", "rich"]
 # ///
 
 # --- CONFIG ---
@@ -10,20 +10,11 @@ LOG_FILE = ".uc.log"  # default is .uc.log
 KEY_FILE = "~/.uc_key"  # default is ~/.uc_key
 RESUME_DIR = ""  # default to /tmp, dir to store uploaded file name/count
 API_BASE = "https://files.union-crax.xyz"
-VERSION = "0.1.6"  # current app version
-FILE_THREADS = 5  # files uploaded in parallel (folder mode)
-CHUNK_THREADS = 3  # chunk upload threads per large file (reduced to avoid 503 saturation)
-DOWNLOAD_CONNS = 16  # parallel Range connections when downloading a URL
-CHUNK_SIZE = 50 * 1024 * 1024  # optimistic default; auto-lowered if server rejects
-MINI_CHUNK_SIZE = 128 * 1024  # 128 KB read buffer
-MAX_SIMPLE_SIZE = 50 * 1024 * 1024  # files <= this go through simple upload
-MAX_RETRIES = 3
-RETRY_DELAY = 5  # seconds between retries
 
 # --- IMPORTS ---
 # ruff: noqa: E402
 import argparse
-import datetime
+import contextlib
 import hashlib
 import io
 import json
@@ -43,20 +34,158 @@ from pathlib import Path
 import requests
 from requests.adapters import HTTPAdapter
 
+# Rich for UV-style UI
+from rich.console import Console, Group
+from rich.filesize import decimal
+from rich.live import Live
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    ProgressColumn,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Column
+from rich.text import Text
+
+# --- INTERNAL CONFIG ---
+try:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        VERSION = version("ucf")
+    except PackageNotFoundError:
+        import re
+
+        try:
+            _pyproject = Path(__file__).parent / "pyproject.toml"
+            _match = re.search(
+                r'^version\s*=\s*["\']([^"\']+)["\']',
+                _pyproject.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            )
+            VERSION = _match.group(1) if _match else "0.0.0-dev"
+        except Exception:
+            VERSION = "0.0.0-dev"
+except ImportError:
+    VERSION = "0.0.0-dev"
+
+FILE_THREADS = 10  # base concurrency
+CHUNK_THREADS = 4  # base chunks
+DOWNLOAD_CONNS = 16  # parallel Range connections when downloading a URL
+CHUNK_SIZE = 50 * 1024 * 1024  # optimistic default; auto-lowered if server rejects
+MINI_CHUNK_SIZE = 1024 * 1024  # 1MB read buffer for 10Gbps throughput
+MAX_SIMPLE_SIZE = 50 * 1024 * 1024  # files <= this go through simple upload
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds between retries
+
 # --- STATE ---
 progress_lock = threading.Lock()
 log_lock = threading.Lock()
 active_uploads = {}
-global_bytes_done = 0
+atomic_bytes_done = 0  # True uploaded byte count
+last_ui_update_bytes = 0  # For throttling
 is_folder_mode = False
 progress_active = False
+EXPIRY_MINUTES = 0  # default: no expiry
+
+# Respect NO_COLOR
+NO_COLOR = "NO_COLOR" in os.environ
+console = Console(no_color=NO_COLOR)
 
 known_folders = set()  # folders we've already verified/created this run
 _folders_fetched = False
 _detected_chunk_limit_bytes = None
 _detected_chunk_limit_lock = threading.Lock()
 
+
+class AverageSpeedColumn(ProgressColumn):
+    """Renders the true average network speed, smoothing out SSD burst reads."""
+
+    def render(self, task):
+        if task.total is None or task.elapsed is None or task.elapsed < 0.1:
+            return Text("? MB/s", style="progress.data.speed", justify="right")
+
+        # True average speed: total bytes / total seconds
+        avg_speed = task.completed / task.elapsed
+        speed_str = f"{decimal(int(avg_speed))}/s"
+        return Text(speed_str, style="progress.data.speed", justify="right")
+
+
+# Global Rich Progress Setup
+overall_progress = Progress(
+    SpinnerColumn(),
+    TextColumn("{task.description}"),
+    TimeElapsedColumn(),
+    AverageSpeedColumn(),
+    TextColumn("{task.fields[skip_text]}"),
+    console=console,
+)
+
+
+def truncate_middle(text, max_length=75):
+    """Truncate text in the middle to preserve start and end (e.g., file extensions)."""
+    if len(text) <= max_length:
+        return text.ljust(max_length)
+    half = (max_length - 3) // 2
+    return text[: half + (max_length - 3) % 2] + "..." + text[-half:]
+
+
+# Custom Bar column configured to stretch and look like uv
+uv_bar = BarColumn(
+    bar_width=None, complete_style="green", finished_style="dim", pulse_style="dim white"
+)
+uv_bar.complete_char = "#"
+uv_bar.finished_char = "-"
+uv_bar.remaining_char = "-"
+
+file_progress = Progress(
+    TextColumn(
+        "[cyan]{task.fields[display_name]}[/cyan]", table_column=Column(width=75, no_wrap=True)
+    ),
+    uv_bar,
+    DownloadColumn(table_column=Column(justify="right", width=17)),
+    AverageSpeedColumn(table_column=Column(justify="right", width=12)),
+    console=console,
+    expand=True,
+)
+
+progress_group = Group(overall_progress, file_progress)
+
+rich_live = None
+task_ids = {}
+total_task_id = None
+
+
 # --- SETUP (key loading, session creation) ---
+
+
+def fetch_limits(session, is_premium=False):
+    """Fetch public upload limits from the API and adjust local constants dynamically."""
+    global MAX_SIMPLE_SIZE, CHUNK_SIZE, CHUNK_THREADS, FILE_THREADS
+    try:
+        data = api_request(session, "GET", "/api/limits")
+        # Balanced scaling: avoid overwhelming the server finalization queue
+        if data.get("ok"):
+            limit = data.get("max_upload_size", data.get("max_simple_size", MAX_SIMPLE_SIZE))
+            MAX_SIMPLE_SIZE = limit
+            if is_premium:
+                CHUNK_SIZE = min(limit, 100 * 1024 * 1024)
+                CHUNK_THREADS = 4
+                FILE_THREADS = 4  # Server hard-caps at ~1.1 files/sec. Higher = connection drops.
+            else:
+                CHUNK_SIZE = min(limit, 50 * 1024 * 1024)
+                CHUNK_THREADS = 2
+                FILE_THREADS = 2
+
+            log(
+                f"Dynamic limits: MAX_SIMPLE_SIZE={human_size(MAX_SIMPLE_SIZE)}, "
+                f"FILE_THREADS={FILE_THREADS}, CHUNK_THREADS={CHUNK_THREADS}"
+            )
+    except Exception as exc:
+        log(f"Could not fetch limits, using defaults: {exc}")
 
 
 def load_key(override_key=None):
@@ -75,13 +204,13 @@ def prompt_key():
     """Ask the user for their API key and validate it."""
     key = input("UC Files API Key (32-char hash): ").strip()
     if not key:
-        print("No key provided. Exiting.")
+        console.print("[red]No key provided. Exiting.[/red]")
         sys.exit(1)
     return key
 
 
 def validate_key(session, key):
-    """Check the key against GET /api/auth/me. Returns True if valid."""
+    """Check the key against GET /api/auth/me. Returns account info dict if valid, else None."""
     try:
         resp = session.get(
             f"{API_BASE}/api/auth/me",
@@ -89,32 +218,32 @@ def validate_key(session, key):
             timeout=15,
         )
         if resp.status_code == 200:
-            return True
+            data = resp.json()
+            if data.get("ok"):
+                return data
         if resp.status_code == 401:
-            return False
+            return None
         # treat other errors as validation failure
         log(f"Key validation returned status {resp.status_code}: {resp.text}")
-        return False
+        return None
     except requests.RequestException as exc:
         log(f"Key validation network error: {exc}")
-        return False
+        return None
 
 
 def save_key(key):
     """Persist a validated key to ~/.uc_key with restrictive permissions."""
     key_path = Path(os.path.expanduser(KEY_FILE))
     key_path.write_text(key)
-    try:
+    with contextlib.suppress(OSError):  # Windows doesn't support Unix permissions
         key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600 — owner-only
-    except OSError:
-        pass  # Windows doesn't support Unix permissions
 
 
 def make_session():
     """Build a requests.Session with large connection pools for threading."""
     session = requests.Session()
-    # max_retries=0 here — api_request() handles retries to avoid double-retry (adapter × manual)
-    adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=0)
+    # pool_maxsize should handle massive parallel file uploads to beat server TTFB latency
+    adapter = HTTPAdapter(pool_connections=200, pool_maxsize=400, max_retries=0)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers["User-Agent"] = "uc-cli/1.0"
@@ -128,12 +257,103 @@ def auth_headers():
 
 # --- UTILITIES (log, human_size, human_time, etc.) ---
 
+# ANSI Colors
+GOLD = "\033[38;2;251;191;36m"
+BLUE = "\033[94m"
+MAGENTA = "\033[95m"
+GREEN = "\033[92m"
+CYAN = "\033[96m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+FADED = "\033[90m"
+RESET = "\033[0m"
+
+
+def colorize(text, color_code):
+    """Wrap text in ANSI color codes if stdout is a TTY."""
+    if NO_COLOR or not sys.stdout.isatty():
+        return text
+    return f"{color_code}{text}{RESET}"
+
+
+def format_duration(seconds):
+    """Format time: '20 minute', '1:30 hour', or '0.4 second'."""
+    if seconds < 1:
+        return f"{seconds:.1f} second"
+    if seconds < 60:
+        return f"{int(seconds)} second"
+    if seconds < 3600:
+        mins = int(seconds // 60)
+        return f"{mins} minute"
+
+    hours = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    if mins > 0:
+        return f"{hours}:{mins:02d} hour"
+    return f"{hours} hour"
+
+
+def format_completion(size_bytes, elapsed_seconds):
+    """Format done message: '51.83KB in 8ms'."""
+    size_str = human_size(size_bytes).replace(" ", "")
+
+    if elapsed_seconds < 1:
+        ms = int(elapsed_seconds * 1000)
+        time_str = f"{ms}ms"
+    elif elapsed_seconds < 60:
+        time_str = f"{elapsed_seconds:.1f}s"
+    else:
+        time_str = format_duration(elapsed_seconds).replace(" ", "")
+
+    return f"{size_str} in {time_str}"
+
+
+class ColorHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """A custom formatter to add colors to the help message."""
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        prefix = colorize("usage: ", BLUE) if prefix is None else colorize(prefix, BLUE)
+
+        usage_str = super()._format_usage(usage, actions, groups, prefix)
+
+        # Colorize the program name
+        prog = self._prog
+        usage_str = usage_str.replace(prog, colorize(prog, MAGENTA), 1)
+
+        # Colorize arguments in brackets [args]
+        usage_str = re.sub(r"(\[.*?\])", lambda m: colorize(m.group(1), CYAN), usage_str)
+        return usage_str
+
+    def start_section(self, heading):
+        return super().start_section(colorize(heading, BLUE))
+
+    def _format_action_invocation(self, action):
+        if not action.option_strings:
+            (metavar,) = self._metavar_formatter(action, action.dest)(1)
+            return colorize(metavar, GREEN)
+        else:
+            parts = []
+            if action.nargs == 0:
+                parts.extend([colorize(s, GREEN) for s in action.option_strings])
+            else:
+                default = action.dest.upper()
+                args_string = self._format_args(action, default)
+                for option_string in action.option_strings:
+                    parts.append(
+                        f"{colorize(option_string, GREEN)} {colorize(args_string, YELLOW)}"
+                    )
+            return ", ".join(parts)
+
 
 def log(msg):
-    """Append a timestamped message to .uc.log cleanly across threads."""
+    """Append a timestamped, thread-aware message to .uc.log cleanly across threads."""
     try:
+        t = time.time()
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+        ms = int((t % 1) * 1000)
+        tid = threading.get_ident()
         with log_lock, open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+            f.write(f"[{ts}.{ms:03d}] [T-{tid}] {msg}\n")
     except Exception:
         pass  # never crash because of logging
 
@@ -202,116 +422,81 @@ def ok_symbol():
 
 
 def api_request(session, method, path, retries=MAX_RETRIES, **kwargs):
-    """
-    Make an API request with automatic retries on transient errors.
-    Handles 401 (bad key) and 413 (chunk too large) specially.
-    """
+    """Make an API request. Optimized for high-throughput Turbo Mode."""
     url = f"{API_BASE}{path}"
     kwargs.setdefault("headers", {})
     kwargs["headers"].update(auth_headers())
     kwargs.setdefault("timeout", 60)
-    log(f">> {method} {path}")
 
-    last_exc = None
     for attempt in range(1, retries + 1):
         try:
             resp = session.request(method, url, **kwargs)
-            resp_len = resp.headers.get("Content-Length", "?")
-            log(f"<< {method} {path} -> {resp.status_code} ({resp_len} bytes)")
 
             if resp.status_code == 401:
-                print("\nInvalid API key — delete ~/.uc_key and re-run.")
-                log("FATAL: 401 Unauthorized — API key rejected")
+                if attempt < retries:
+                    time.sleep(RETRY_DELAY)
+                    continue
+                console.print("\n[red]Invalid API key — delete ~/.uc_key and re-run.[/red]")
                 os._exit(1)
 
             if resp.status_code == 413:
-                # Don't hard-exit the entire run; let caller fail this item and continue.
-                detail = resp.text.strip()[:500]
-                log(f"HTTP 413 on {method} {path}: {detail}")
-                raise requests.HTTPError(
-                    f"413 Payload Too Large on {method} {path}: {detail}",
-                    response=resp,
-                )
+                raise requests.HTTPError("413 Payload Too Large", response=resp)
 
-            if resp.status_code >= 500:
-                log(
-                    f"RETRY: server error {resp.status_code} on {method} {path} (attempt {attempt}), body: {resp.text[:500]}"
-                )
-                last_exc = Exception(f"HTTP {resp.status_code}")
-                if attempt < retries:
-                    # The backend explicitly reports worker saturation on 503.
-                    # Back off progressively so we recover instead of failing a whole file.
-                    delay = RETRY_DELAY
-                    if resp.status_code == 503:
-                        delay = min(30, RETRY_DELAY * attempt)
-                    time.sleep(delay)
+            if resp.status_code >= 500 and attempt < retries:
+                time.sleep(min(10, RETRY_DELAY * attempt))
                 continue
 
-            if 400 <= resp.status_code < 500:
-                log(f"CLIENT ERROR body on {method} {path}: {resp.text[:1000]}")
-
-            # log response body for API calls that return JSON (useful for debugging field names)
-            if "/api/" in path and resp.headers.get("content-type", "").startswith(
-                "application/json"
-            ):
-                log(f"   response json: {resp.text[:1000]}")
+            # Performance: Parse JSON exactly once and return the object
+            if resp.headers.get("content-type", "").startswith("application/json"):
+                try:
+                    data = resp.json()
+                    if not data.get("ok") and resp.status_code == 200:
+                        raise Exception(f"API Error: {data.get('error', 'Unknown')}")
+                    return data
+                except ValueError:
+                    return resp
 
             return resp
 
         except requests.RequestException as exc:
-            log(f"Request error on {method} {path} (attempt {attempt}): {exc}")
-            last_exc = exc
             if attempt < retries:
-                time.sleep(RETRY_DELAY)
+                # Connection dropped or timed out — retry quickly
+                # (likely a stale keep-alive)
+                delay = (
+                    1
+                    if isinstance(
+                        exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
+                    )
+                    else RETRY_DELAY
+                )
+                time.sleep(delay)
+                # Rewind stream if possible for retry
                 if "data" in kwargs and hasattr(kwargs["data"], "seek"):
-                    try:
+                    with contextlib.suppress(Exception):
                         kwargs["data"].seek(0)
-                    except Exception as e:
-                        log(f"Stream seek failed: {e}")
-
-                # If the connection pool was poisoned by a network drop,
-                # forcefully bypass the pool completely for this retry.
-                if isinstance(
-                    exc,
-                    (
-                        requests.exceptions.ConnectionError,
-                        requests.exceptions.ChunkedEncodingError,
-                    ),
-                ):
-                    log(f"Bypassing session pool for retry due to connection error: {exc}")
-                    session = requests
-
-    raise last_exc
+                continue
+            raise exc
 
 
 # --- PROGRESS BAR ---
 
 
-def _term_width():
-    """Get terminal width, fallback to 80 for dumb terminals."""
-    try:
-        return shutil.get_terminal_size((80, 24)).columns
-    except Exception:
-        return 80
-
-
-def _clear_drawn_lines():
-    width = _term_width()
-    sys.stdout.write("\r" + " " * (width - 1) + "\r")
-    sys.stdout.flush()
-
-
 def start_progress(filename, total_size, folder_mode=False):
-    global progress_active, is_folder_mode
+    global progress_active, is_folder_mode, progress_group, rich_live, task_ids, file_progress
     with progress_lock:
-        if progress_active:
-            _clear_drawn_lines()
-
+        is_folder_mode = folder_mode
         if not progress_active:
-            is_folder_mode = folder_mode
             progress_active = True
-            t = threading.Thread(target=_draw_loop, daemon=True)
-            t.start()
+            if not rich_live:
+                rich_live = Live(
+                    progress_group, console=console, refresh_per_second=10, transient=False
+                )
+                rich_live.start()
+
+        # Always add individual tasks to file_progress now, since we immediately remove them
+        display_name = truncate_middle(os.path.basename(filename), 75)
+        task_id = file_progress.add_task("upload", total=total_size, display_name=display_name)
+        task_ids[filename] = task_id
 
         active_uploads[filename] = {
             "done": 0,
@@ -321,139 +506,89 @@ def start_progress(filename, total_size, folder_mode=False):
 
 
 def finish_progress(filename, size, url, elapsed=None, speed=None):
-    global progress_active
+    global progress_active, file_progress, rich_live, task_ids
     with progress_lock:
-        _clear_drawn_lines()
+        # Stop and remove individual task immediately to avoid clutter
+        if filename in task_ids:
+            task_id = task_ids[filename]
+            file_progress.update(task_id, visible=False)
+            file_progress.remove_task(task_id)
+            del task_ids[filename]
+
+        # Record timing for stats
+        stats = active_uploads.get(filename, {"start_time": time.time()})
+        dur = time.time() - stats["start_time"]
+
+        # SILENT SUCCESS: Only print in single-file mode
+        if not is_folder_mode:
+            msg = Text.assemble(
+                (" ", ""),
+                (f"{ok_symbol()} ", "green"),
+                (f"{filename} ", "cyan"),
+                (f"{human_size(size)} ", "dim"),
+                (f"in {format_duration(dur)}", "dim"),
+            )
+            console.print(msg)
+            if url:
+                if not url.startswith("http"):
+                    url = f"{API_BASE}{url}"
+                console.print(f"   [cyan]{url}[/cyan]")
+
         if filename in active_uploads:
             del active_uploads[filename]
 
-        if url and not url.startswith("http"):
-            url = f"{API_BASE}{url}"
-
-        if is_folder_mode:
-            print(f" {ok_symbol()} {filename} [{human_size(size)}]")
-        else:
-            if elapsed is not None and speed is not None and speed > 0:
-                print(f"{human_time(elapsed)} - {human_size(speed)}/s")
-            print(f" {ok_symbol()} {filename} [{human_size(size)}]")
-            if url:
-                print(url)
-
-        if not active_uploads:
+        if not active_uploads and progress_active and not is_folder_mode:
+            if rich_live:
+                rich_live.stop()
+                rich_live = None
             progress_active = False
 
 
 def fail_progress(filename, exc):
-    global progress_active
+    global progress_active, file_progress, rich_live, task_ids
     with progress_lock:
-        _clear_drawn_lines()
+        if filename in task_ids:
+            task_id = task_ids[filename]
+            file_progress.remove_task(task_id)
+            del task_ids[filename]
+
         if filename in active_uploads:
             del active_uploads[filename]
-        print(f" [X] FAIL: {filename} -> {exc}")
-        if not active_uploads:
+
+        console.print(f" [red][X] FAIL: {filename}[/red] -> {exc}")
+
+        if not active_uploads and progress_active and not is_folder_mode:
+            if rich_live:
+                rich_live.stop()
+                rich_live = None
             progress_active = False
 
 
 def add_progress(filename, n):
-    global global_bytes_done
+    global \
+        atomic_bytes_done, \
+        last_ui_update_bytes, \
+        overall_progress, \
+        file_progress, \
+        task_ids, \
+        total_task_id
+    # update atomic counter
     with progress_lock:
-        if filename in active_uploads:
-            active_uploads[filename]["done"] += n
-        global_bytes_done += n
+        atomic_bytes_done += n
+        current_total = atomic_bytes_done
 
+        # Throttle UI updates for the overall task to save CPU
+        if (
+            overall_progress
+            and total_task_id is not None
+            and (current_total - last_ui_update_bytes) > (512 * 1024)
+        ):
+            overall_progress.update(total_task_id, completed=current_total)
+            last_ui_update_bytes = current_total
 
-def _draw_loop():
-    global global_bytes_done, progress_active
-    last_global_done = global_bytes_done
-    last_time = time.time()
-    speed_window = []
-
-    while True:
-        with progress_lock:
-            if not progress_active and not active_uploads:
-                return
-
-            if active_uploads:
-                _clear_drawn_lines()
-
-                total_bytes = sum(s["total"] for s in active_uploads.values())
-                done_bytes = sum(s["done"] for s in active_uploads.values())
-
-                now = time.time()
-                dt = now - last_time
-                if dt > 0:
-                    inst_speed = max(0, global_bytes_done - last_global_done) / dt
-                    speed_window.append(inst_speed)
-                    speed_window = speed_window[-5:]
-
-                last_time = now
-                last_global_done = global_bytes_done
-
-                avg_speed = sum(speed_window) / len(speed_window) if speed_window else 0
-
-                if total_bytes > 0:
-                    pct = int(done_bytes / total_bytes * 100)
-                else:
-                    pct = 0
-
-                if avg_speed > 0 and total_bytes > 0:
-                    eta_secs = max(0, total_bytes - done_bytes) / avg_speed
-                    time_str = str(datetime.timedelta(seconds=int(eta_secs)))
-                else:
-                    time_str = "--:--"
-
-                # compute best file
-                best_file = ""
-                best_pct = -1
-                for fname, stats in active_uploads.items():
-                    if stats["total"] > 0:
-                        p = stats["done"] / stats["total"]
-                        if p > best_pct:
-                            best_pct = p
-                            best_file = fname
-
-                width = _term_width()
-
-                is_only_downloading = all(
-                    f.startswith("(downloading) ") for f in active_uploads
-                )
-                verb = "Downloading" if is_only_downloading else "Uploading"
-                best_file_display = (
-                    best_file[14:] if best_file.startswith("(downloading) ") else best_file
-                )
-
-                header_line = f"{verb}: {best_file_display}"
-                if len(active_uploads) > 1:
-                    header_line += f" (+{len(active_uploads) - 1} others)"
-                if len(header_line) > width - 1:
-                    header_line = header_line[: width - 4] + "..."
-                header_line = header_line.strip()
-
-                speed_str = f"{human_size(avg_speed)}/s"
-                done_str = human_size(done_bytes)
-                total_str = human_size(total_bytes)
-
-                if done_bytes >= total_bytes and total_bytes > 0:
-                    time_str = "Finalizing"
-                    speed_str = "---"
-
-                base_str = (
-                    f"[{time_str}] [{speed_str}] [ {pct:>3}%] {header_line} {done_str}/{total_str}"
-                )
-
-                bar_len = max(5, (width - 1) - len(base_str))
-                filled = int(bar_len * done_bytes / total_bytes) if total_bytes > 0 else 0
-                bar = "#" * filled + "-" * (bar_len - filled)
-
-                line = f"[{time_str}] [{speed_str}] [{bar} {pct:>3}%] {header_line} {done_str}/{total_str}"
-
-                if len(line) > width - 1:
-                    line = line[: width - 1]
-
-                sys.stdout.write(f"\r{line}")
-                sys.stdout.flush()
-
-        time.sleep(0.2)
+    # Individual file bars are updated immediately (they handle their own frame limiting in Rich)
+    if file_progress and filename in task_ids:
+        file_progress.update(task_ids[filename], advance=n)
 
 
 # --- FOLDER MANAGEMENT ---
@@ -472,8 +607,7 @@ def ensure_folders_cached(session):
             return
         log("Fetching folder list from API")
         try:
-            resp = api_request(session, "GET", "/api/folders")
-            data = resp.json()
+            data = api_request(session, "GET", "/api/folders")
             items = []
             if isinstance(data, list):
                 items = data
@@ -512,7 +646,7 @@ def ensure_folder_exists(session, folder_name):
             return
         log(f"Creating folder: {folder_name}")
         try:
-            resp = api_request(
+            rdata = api_request(
                 session,
                 "POST",
                 "/api/folders/create",
@@ -520,7 +654,6 @@ def ensure_folder_exists(session, folder_name):
             )
             known_folders.add(folder_name)
             # capture folder url from creation response
-            rdata = resp.json()
             log(f"Folder create response: {rdata}")
             furl = rdata.get("url", rdata.get("link", ""))
             fid = rdata.get("id", rdata.get("folder_id", ""))
@@ -535,7 +668,7 @@ def ensure_folder_exists(session, folder_name):
 # --- UPLOAD: SMALL FILE ---
 
 
-def _build_multipart(filename, filepath, file_size, folder=""):
+def _build_multipart(filename, filepath, file_size, folder="", expires_minutes=0):
     """
     Build a multipart/form-data body manually so we can stream it via data=
     and track actual network bytes sent (not just file reads buffered in memory).
@@ -549,6 +682,13 @@ def _build_multipart(filename, filepath, file_size, folder=""):
         parts_header += (
             f'--{boundary}\r\nContent-Disposition: form-data; name="folder"\r\n\r\n{folder}\r\n'
         ).encode()
+    # optional expiry
+    if expires_minutes > 0:
+        parts_header += (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="expires_minutes"'
+            f"\r\n\r\n{expires_minutes}\r\n"
+        ).encode()
     # file field header
     parts_header += (
         f"--{boundary}\r\n"
@@ -559,7 +699,7 @@ def _build_multipart(filename, filepath, file_size, folder=""):
     total_body = len(parts_header) + file_size + len(parts_footer)
     stream = _MultipartStream(
         parts_header,
-        open(filepath, "rb"),
+        open(filepath, "rb"),  # noqa: SIM115
         parts_footer,
         total_body,
         file_size,
@@ -570,7 +710,7 @@ def _build_multipart(filename, filepath, file_size, folder=""):
 
 class _BoundedFile:
     def __init__(self, filepath, offset, length):
-        self.f = open(filepath, "rb")
+        self.f = open(filepath, "rb")  # noqa: SIM115
         self.original_offset = offset
         self.original_length = length
         self.f.seek(offset)
@@ -689,26 +829,30 @@ class _MultipartStream:
 
     def close(self):
         for p in self._parts:
-            try:
+            with contextlib.suppress(Exception):
                 p.close()
-            except Exception:
-                pass
 
 
 def upload_small(session, filepath, folder="", folder_mode=False, filename=None):
     """Upload a file <= 50 MB using the simple POST /api/upload endpoint."""
+    global EXPIRY_MINUTES
     if filename is None:
         filename = os.path.basename(filepath)
     file_size = os.path.getsize(filepath)
 
-    log(f"UPLOAD SMALL: {filename} ({human_size(file_size)}) -> folder={folder!r}")
+    log(
+        f"UPLOAD SMALL: {filename} ({human_size(file_size)}) -> "
+        f"folder={folder!r} expiry={EXPIRY_MINUTES}"
+    )
     start_progress(filename, file_size, folder_mode)
     t0 = time.time()
     try:
-        # build multipart body manually so we stream it and track real upload progress
-        boundary, stream, body_len = _build_multipart(filename, filepath, file_size, folder)
+        # Stream the upload so the rich progress bar updates in real-time
+        boundary, stream, body_len = _build_multipart(
+            filename, filepath, file_size, folder, EXPIRY_MINUTES
+        )
         try:
-            resp = api_request(
+            result = api_request(
                 session,
                 "POST",
                 "/api/upload",
@@ -717,16 +861,15 @@ def upload_small(session, filepath, folder="", folder_mode=False, filename=None)
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
                     "Content-Length": str(body_len),
                 },
+                retries=3,
                 timeout=300,
             )
         finally:
             stream.close()
+
         elapsed = time.time() - t0
         avg_speed = file_size / elapsed if elapsed > 0 else 0
-        try:
-            result = resp.json()
-        except ValueError:
-            raise Exception(f"HTTP {resp.status_code} Non-JSON response: {resp.text[:500]}")
+
         log(f"Upload response: {result}")
         url = result.get("url", result.get("link", ""))
         file_id = result.get("id", result.get("file_id", ""))
@@ -772,11 +915,12 @@ def _set_detected_chunk_limit(limit_bytes):
 
 def _init_chunked_upload(session, filename, file_size, folder):
     """Initialize chunked upload and adapt to server-side chunk cap when necessary."""
+    global EXPIRY_MINUTES
     chunk_size = _get_effective_chunk_size()
 
     for _attempt in range(2):
         chunk_count = math.ceil(file_size / chunk_size)
-        resp = api_request(
+        data = api_request(
             session,
             "POST",
             "/api/upload/init",
@@ -785,28 +929,27 @@ def _init_chunked_upload(session, filename, file_size, folder):
                 "size": file_size,
                 "chunk_count": chunk_count,
                 "folder": folder,
+                "expires_minutes": EXPIRY_MINUTES,
             },
         )
 
-        if resp.status_code == 200:
-            try:
-                data = resp.json()
-            except ValueError:
-                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+        # api_request returns the dict if ok is true
+        if isinstance(data, dict) and data.get("ok"):
             upload_id = data.get("upload_id", data.get("uploadId", ""))
             if upload_id:
                 return upload_id, chunk_size, chunk_count, data
             raise RuntimeError(f"Chunk init missing upload_id: {data}")
 
-        body = (resp.text or "").strip()
-        limit_bytes = _extract_chunk_limit_bytes(body)
-        if resp.status_code == 400 and limit_bytes:
-            _set_detected_chunk_limit(limit_bytes)
-            if limit_bytes != chunk_size:
-                chunk_size = limit_bytes
-                continue
-
-        raise RuntimeError(f"Chunk init failed ({resp.status_code}): {body[:300]}")
+        # Fallback if api_request returned raw response (for status code checking)
+        if hasattr(data, "status_code"):
+            body = (data.text or "").strip()
+            limit_bytes = _extract_chunk_limit_bytes(body)
+            if data.status_code == 400 and limit_bytes:
+                _set_detected_chunk_limit(limit_bytes)
+                if limit_bytes != chunk_size:
+                    chunk_size = limit_bytes
+                    continue
+            raise RuntimeError(f"Chunk init failed ({data.status_code}): {body[:300]}")
 
     raise RuntimeError("Chunk init failed after adaptive retry")
 
@@ -824,11 +967,12 @@ def upload_large(session, filepath, folder="", folder_mode=False, filename=None)
         )
     except Exception as exc:
         log(f"Chunked init exception for {filename}: {exc}")
-        print(f"[X] FAIL: {filename} -> chunked init failed: {exc}")
+        console.print(f"[red][X] FAIL: {filename}[/red] -> chunked init failed: {exc}")
         return None
 
     log(
-        f"UPLOAD LARGE: {filename} ({human_size(file_size)}) -> {chunk_count} chunks @ {human_size(chunk_size)}, folder={folder!r}"
+        f"UPLOAD LARGE: {filename} ({human_size(file_size)}) -> "
+        f"{chunk_count} chunks @ {human_size(chunk_size)}, folder={folder!r}"
     )
 
     t0 = time.time()
@@ -863,16 +1007,12 @@ def upload_large(session, filepath, folder="", folder_mode=False, filename=None)
         return None
 
     # step 3: finish
-    finish_resp = api_request(
+    finish_data = api_request(
         session,
         "POST",
         "/api/upload/finish",
         json={"upload_id": upload_id},
     )
-    try:
-        finish_data = finish_resp.json()
-    except ValueError:
-        raise Exception(f"HTTP {finish_resp.status_code} on finish: {finish_resp.text[:500]}")
 
     # step 4: use finish URL directly (best throughput), poll only if URL is missing
     file_id = finish_data.get("id", finish_data.get("file_id", ""))
@@ -921,18 +1061,16 @@ def _poll_until_ready(session, upload_id, file_id="", max_wait=300):
     while time.time() < deadline:
         for status_id in ids_to_try:
             try:
-                resp = api_request(session, "GET", f"/api/upload/status?id={status_id}", retries=1)
-                if resp.status_code == 404:
-                    # Some uploads are visible under upload_id before file_id (or vice versa).
-                    continue
+                data = api_request(session, "GET", f"/api/upload/status?id={status_id}", retries=1)
 
-                data = resp.json()
-                status = data.get("status", "")
-                if status == "ready":
-                    return data.get("url", data.get("link", ""))
-                if status in ("error", "failed"):
-                    log(f"Upload processing failed for {status_id}: {data}")
-                    return None
+                # api_request returns dict if success
+                if isinstance(data, dict):
+                    status = data.get("status", "")
+                    if status == "ready":
+                        return data.get("url", data.get("link", ""))
+                    if status in ("error", "failed"):
+                        log(f"Upload processing failed for {status_id}: {data}")
+                        return None
             except Exception as exc:
                 log(f"Poll error for {status_id}: {exc}")
         time.sleep(2)
@@ -1044,8 +1182,8 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
         )
     except Exception as exc:
         log(f"Pipe init failed for {filename}: {exc}")
-        print(f"\nChunked upload init failed for {filename}: {exc}")
-        return
+        console.print(f"\n[red]Chunked upload init failed for {filename}: {exc}[/red]")
+        return None
 
     t0 = time.time()
     start_progress(filename, file_size, folder_mode)
@@ -1090,16 +1228,12 @@ def _pipe_upload(session, url, filename, file_size, folder, folder_mode=False):
         return
 
     # finish
-    finish_resp = api_request(
+    finish_data = api_request(
         session,
         "POST",
         "/api/upload/finish",
         json={"upload_id": upload_id},
     )
-    try:
-        finish_data = finish_resp.json()
-    except ValueError:
-        raise Exception(f"HTTP {finish_resp.status_code} on pipe finish: {finish_resp.text[:500]}")
 
     file_id = finish_data.get("id", finish_data.get("file_id", ""))
     fallback_url = finish_data.get("url", finish_data.get("link", ""))
@@ -1204,7 +1338,6 @@ def _fallback_download_and_upload(session, url, filename, file_size, folder, fol
     downloaded_bytes = 0
     aria2_success = False
 
-    import shutil
     import subprocess
 
     # Attempt ultra-fast aria2 download if uvx is available and starting fresh
@@ -1257,10 +1390,8 @@ def _fallback_download_and_upload(session, url, filename, file_size, folder, fol
     process_file(session, tmp_path, folder, folder_mode, filename)
 
     # clean up temp file
-    try:
+    with contextlib.suppress(OSError):
         os.remove(tmp_path)
-    except OSError:
-        pass
 
 
 # --- ORCHESTRATOR (process_file, process_url, process_folder) ---
@@ -1285,10 +1416,7 @@ def process_folder(session, folder_path, dest_folder="", resume=True):
 
     # persistent checkpoint so retries continue where they left off
     state_path = _resume_state_path(folder_path, target_folder)
-    if resume:
-        resume_state = _load_resume_state(state_path)
-    else:
-        resume_state = {"version": 1, "done": {}}
+    resume_state = _load_resume_state(state_path) if resume else {"version": 1, "done": {}}
 
     # build list of (local_path, remote_folder) tuples
     to_upload = []
@@ -1329,52 +1457,93 @@ def process_folder(session, folder_path, dest_folder="", resume=True):
             to_upload.append((local_path, remote_folder, rel_file, size, mtime_ns))
 
     if not to_upload:
-        print("No pending files found in the folder (resume checkpoint says all done).")
+        console.print(
+            "[dim]No pending files found in the folder (resume checkpoint says all done).[/dim]"
+        )
         return
 
-    # ensure all needed remote folders exist (deduplicated)
-    ensure_folders_cached(session)
-    remote_dirs = set(item[1] for item in to_upload if item[1])
-    for rd in remote_dirs:
-        ensure_folder_exists(session, rd)
-
     total_size = sum(f[3] for f in to_upload)
-    log(
-        f"FOLDER: pending={len(to_upload)} files ({human_size(total_size)}), "
-        f"skipped={skipped_count} files ({human_size(skipped_bytes)}), dest={dest_folder!r}"
-    )
-    print(
-        f"Uploading pending {len(to_upload)} file(s) ({human_size(total_size)}), "
-        f"skipping {skipped_count} already-completed file(s) ({human_size(skipped_bytes)})\n"
-    )
 
+    # Print intent immediately
+    console.print(
+        f"Uploading pending [cyan]{len(to_upload)}[/cyan] file(s) "
+        f"({human_size(total_size)}), skipping [dim]{skipped_count}[/dim] "
+        f"already-completed file(s) ({human_size(skipped_bytes)})"
+    )
+    console.print("")
+
+    # start uploads in massive batches
     t0_folder = time.time()
     success_count = 0
     fail_count = 0
 
-    with ThreadPoolExecutor(max_workers=FILE_THREADS) as pool:
+    global total_task_id
+    # Add Total Progress anchor
+    skip_str = (
+        f", skipping {skipped_count} already-completed file(s) ({human_size(skipped_bytes)})"
+        if skipped_count > 0
+        else ""
+    )
+    total_task_id = overall_progress.add_task(
+        f"Uploading 0/{len(to_upload)} ({human_size(total_size)})",
+        total=total_size,
+        skip_text=skip_str,
+    )
+
+    # Ensure thread pool is large enough for premium concurrency
+    # Start Live display context IMMEDIATELY to show activity
+    with (
+        ThreadPoolExecutor(max_workers=FILE_THREADS) as pool,
+        Live(progress_group, console=console, refresh_per_second=10, transient=False) as live,
+    ):
+        global rich_live
+        rich_live = live
         futures = {}
         for path, remote_dir, rel_file, size, mtime_ns in to_upload:
+            # Pre-submit tasks as fast as possible.
+            # ensure_folder_exists is called inside process_file on-demand.
             fut = pool.submit(process_file, session, path, remote_dir, True)
             futures[fut] = (rel_file, size, mtime_ns)
+
+        # Process results as they complete, using immediate UI updates
         for fut in as_completed(futures):
             rel_file, size, mtime_ns = futures[fut]
             try:
                 result = fut.result()
                 if result:
                     success_count += 1
+                    # Performance: Update local memory state ONLY
                     resume_state["done"][rel_file] = {
                         "size": size,
                         "mtime_ns": mtime_ns,
                         "url": result,
                         "uploaded_at": int(time.time()),
                     }
-                    _save_resume_state(state_path, resume_state)
                 else:
                     fail_count += 1
             except Exception as exc:
-                log(f"Folder upload error: {exc}")
+                # Log failures to memory log if possible
+                log(f"Critical upload error for {rel_file}: {exc}")
+                console.print(f" [red][X] FAIL: {rel_file}[/red] -> {exc}")
                 fail_count += 1
+
+            # Update File Count in real time so tiny files don't look "stuck"
+            if total_task_id is not None:
+                task = overall_progress._tasks.get(total_task_id)
+                if task:
+                    processed = success_count + fail_count
+                    if processed >= len(to_upload):
+                        overall_progress.update(total_task_id, description="Finalizing...")
+                    else:
+                        desc = f"Uploading {processed}/{len(to_upload)} ({human_size(total_size)})"
+                        overall_progress.update(total_task_id, description=desc)
+
+        # Reset global UI states
+        rich_live = None
+        total_task_id = None
+
+    # Turbo Mode: Save state EXACTLY ONCE at the end
+    _save_resume_state(state_path, resume_state)
 
     # folder summary at the end
     elapsed = time.time() - t0_folder
@@ -1384,15 +1553,23 @@ def process_folder(session, folder_path, dest_folder="", resume=True):
         folder_link = f"{API_BASE}{folder_link}"
 
     log(
-        f"FOLDER DONE: {target_folder} pending=[{human_size(total_size)}] in {human_time(elapsed)} at {human_size(avg_speed)}/s, "
-        f"success={success_count}, failed={fail_count}, skipped={skipped_count}, checkpoint={str(state_path)!r}, link={folder_link!r}"
+        f"FOLDER DONE: {target_folder} "
+        f"pending=[{human_size(total_size)}] "
+        f"in {human_time(elapsed)} at {human_size(avg_speed)}/s, "
+        f"success={success_count}, failed={fail_count}, "
+        f"skipped={skipped_count}, "
+        f"checkpoint={str(state_path)!r}, link={folder_link!r}"
     )
-    print(
-        f"{target_folder} [{human_size(total_size)} pending] - {human_time(elapsed)} "
-        f"(success={success_count}, failed={fail_count}, skipped={skipped_count})"
+
+    summary = Text.assemble(
+        (f"{target_folder} ", "cyan"),
+        (f"[{human_size(total_size)} pending] - ", "dim"),
+        (f"{format_duration(elapsed)} ", "green"),
+        (f"(success={success_count}, failed={fail_count}, skipped={skipped_count})", "dim"),
     )
+    console.print(summary)
     if folder_link:
-        print(folder_link)
+        console.print(f"[cyan]{folder_link}[/cyan]")
 
     if fail_count > 0:
         raise RuntimeError(
@@ -1418,18 +1595,24 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog=prog_name,
-        description="uc.py — blazing-fast CLI uploader for UC Files (files.union-crax.xyz)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=colorize(
+            "uc.py — blazing-fast CLI uploader for UC Files (files.union-crax.xyz)",
+            CYAN,
+        ),
+        formatter_class=ColorHelpFormatter,
         epilog=(
-            "examples:\n"
-            "  python uc.py video.mp4\n"
-            "  uvx ucf /home/user/movies -d Films\n"
-            "  uvx ucf https://example.com/archive.zip -d Downloads\n"
-            "  uv run uc.py big_folder/ -d Backup\n"
+            f"{colorize('examples:', BLUE)}\n"
+            f"  python {colorize('uc.py', MAGENTA)} video.mp4\n"
+            f"  {colorize('uvx ucf', MAGENTA)} /home/user/movies -d Films\n"
+            f"  {colorize('uvx ucf', MAGENTA)} https://example.com/archive.zip -d Downloads\n"
+            f"  {colorize('uv run uc.py', MAGENTA)} big_folder/ -d Backup\n"
         ),
     )
     parser.add_argument("target", nargs="?", help="Local file, local folder, or remote URL")
     parser.add_argument("-d", dest="folder", default="", help="Destination folder on UC Files")
+    parser.add_argument(
+        "-e", "--expiry", type=int, default=0, help="File expiry in minutes (0 = never)"
+    )
     parser.add_argument("--key", dest="key", default=None, help="Override API key for this session")
     parser.add_argument("--key-file", default=KEY_FILE, help="Path to API key file")
     parser.add_argument("--log-file", default=LOG_FILE, help="Path to log file")
@@ -1453,6 +1636,8 @@ def main():
     LOG_FILE = args.log_file
     KEY_FILE = args.key_file
     RESUME_DIR = args.resume_dir or tempfile.gettempdir()
+    global EXPIRY_MINUTES
+    EXPIRY_MINUTES = args.expiry
 
     if not args.target:
         parser.print_help()
@@ -1468,15 +1653,31 @@ def main():
         API_KEY = prompt_key()
         was_prompted = True
 
-    if not validate_key(session, API_KEY):
-        print("Invalid API key. Please check and try again.")
+    account_info = validate_key(session, API_KEY)
+    if not account_info:
+        console.print("[red]Invalid API key. Please check and try again.[/red]")
         sys.exit(1)
 
     # save key: always persist a validated key, whether from --key or from first prompt
     key_path = Path(os.path.expanduser(KEY_FILE))
     if args.key or was_prompted or not key_path.exists() or key_path.stat().st_size == 0:
         save_key(API_KEY)
-        print(f"Key verified and saved to `{key_path.resolve()}`")
+        console.print(f"[dim]Key verified and saved to `{key_path.resolve()}`[/dim]")
+
+    # Fetch limits and show account info
+    is_premium = account_info.get("is_premium", False)
+    fetch_limits(session, is_premium)
+
+    premium_label = "[gold1]Premium[/gold1]" if is_premium else "Free"
+    login_msg = f"Logged in as: {account_info.get('hash')[:8]}... [{premium_label}]"
+    console.print(f"[dim]{login_msg}[/dim]")
+
+    file_count = account_info.get("file_count", 0)
+    console.print(f"[dim]Files: {file_count}[/dim]")
+
+    if EXPIRY_MINUTES > 0:
+        console.print(f"Expiry set to: {EXPIRY_MINUTES} minutes", style="gold1")
+    console.print("")
 
     target = args.target
     folder = args.folder
@@ -1495,10 +1696,10 @@ def main():
             ensure_folder_exists(session, folder)
         process_file(session, target, folder)
     else:
-        print(f"Target not found: {target}")
+        console.print(f"[red]Target not found: {target}[/red]")
         sys.exit(1)
 
-    print("")
+    console.print("")
 
 
 if __name__ == "__main__":
@@ -1521,6 +1722,9 @@ if __name__ == "__main__":
         os._exit(0)
     except Exception as exc:
         log(f"Unhandled exception: {exc}")
+        import traceback
+
+        traceback.print_exc()
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(1)
