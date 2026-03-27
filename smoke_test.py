@@ -12,7 +12,7 @@ def create_dummy_file():
         f.write(os.urandom(MB_SIZE))
 
 
-def test_host(name, script):
+def run_test_host(name, script):
     print(f"\n[{name}] Testing upload...")
     start_time = time.time()
     try:
@@ -61,7 +61,7 @@ def main():
                 print(f"⚠️ Skipping {name} - file {script} not found.")
                 continue
 
-            results[name] = test_host(name, script)
+            results[name] = run_test_host(name, script)
             time.sleep(2)  # brief pause between tests to not hit ratelimits
 
         print("\n=== SMOKE TEST SUMMARY ===")
@@ -70,7 +70,6 @@ def main():
             status = "✅ PASSED" if passed else "❌ FAILED"
             print(f"{name:20s}: {status}")
             if not passed:
-                all_passed = True  # wait, it should be False
                 all_passed = False
 
         if all_passed:
