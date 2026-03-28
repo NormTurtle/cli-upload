@@ -410,7 +410,8 @@ def compute_total_size(target_path):
     return total
 
 
-if __name__ == "__main__":
+def main():
+    global LOG_FILE, KEY_FILE, RESUME_DIR, FILE_THREADS, CHUNK_THREADS, FORCE_LEGACY_FOR_FOLDERS
     parser = argparse.ArgumentParser()
     parser.add_argument("target", help="File or Folder")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -434,7 +435,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    global LOG_FILE, KEY_FILE, RESUME_DIR
     LOG_FILE = args.log_file
     KEY_FILE = args.key_file
     RESUME_DIR = args.resume_dir or tempfile.gettempdir()
@@ -554,3 +554,6 @@ if __name__ == "__main__":
         f"Done. Success: {ok_count}, Failed: {fail_count}, Skipped: {skipped_count} "
         f"({human_size(skipped_bytes)})"
     )
+
+if __name__ == "__main__":
+    main()

@@ -15,6 +15,7 @@ API_BASE = "https://files.union-crax.xyz"
 # ruff: noqa: E402
 import argparse
 import contextlib
+import getpass
 import hashlib
 import io
 import json
@@ -202,7 +203,8 @@ def load_key(override_key=None):
 
 def prompt_key():
     """Ask the user for their API key and validate it."""
-    key = input("UC Files API Key (32-char hash): ").strip()
+    # SECURITY: Mask sensitive input to prevent shoulder surfing or exposure in terminal history
+    key = getpass.getpass("UC Files API Key (32-char hash): ").strip()
     if not key:
         console.print("[red]No key provided. Exiting.[/red]")
         sys.exit(1)

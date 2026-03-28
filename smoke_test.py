@@ -12,13 +12,15 @@ def create_dummy_file():
         f.write(os.urandom(MB_SIZE))
 
 
-def test_host(name, script):
+def run_host_test(name, script):
     print(f"\n[{name}] Testing upload...")
     start_time = time.time()
     try:
         # Run the script with the dummy file
+        # automated integration tests using subprocess.run will block and time out if invoked CLI scripts interactively prompt for user inputs via getpass
+        # To prevent this, bypass the prompts by passing input='\n' to subprocess.run.
         result = subprocess.run(
-            ["python", script, DUMMY_FILE], capture_output=True, text=True, timeout=120
+            ["python", script, DUMMY_FILE], capture_output=True, text=True, timeout=120, input='\n'
         )
         elapsed = time.time() - start_time
 
@@ -61,7 +63,7 @@ def main():
                 print(f"⚠️ Skipping {name} - file {script} not found.")
                 continue
 
-            results[name] = test_host(name, script)
+            results[name] = run_host_test(name, script)
             time.sleep(2)  # brief pause between tests to not hit ratelimits
 
         print("\n=== SMOKE TEST SUMMARY ===")

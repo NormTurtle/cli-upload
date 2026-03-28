@@ -1,0 +1,4 @@
+## 2024-05-18 - Masking Sensitive CLI Inputs
+**Vulnerability:** Prompting for sensitive API keys using the standard `input()` function echoes the secret to the terminal, leaving it visible to shoulder-surfers and potentially exposing it in terminal history logs.
+**Learning:** In CLI tools (`uc.py`), using standard `input()` for authentication tokens is a high-risk practice because it violates the principle of failing securely and keeping secrets masked.
+**Prevention:** Always use the `getpass` module (`getpass.getpass()`) for any prompt that accepts passwords, API keys, or security tokens to ensure the input is not echoed to the terminal. Additionally, automated integration tests testing this functionality via subprocesses must bypass these prompts (e.g., using `input='\n'`) to prevent hanging.
