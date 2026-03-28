@@ -460,6 +460,7 @@ if __name__ == "__main__":
     if args.file_threads < 1 or args.chunk_threads < 1:
         sys.exit("--file-threads and --chunk-threads must be >= 1")
 
+    global FILE_THREADS, CHUNK_THREADS, FORCE_LEGACY_FOR_FOLDERS
     FILE_THREADS = args.file_threads
     CHUNK_THREADS = args.chunk_threads
     FORCE_LEGACY_FOR_FOLDERS = not args.chunked_folders
