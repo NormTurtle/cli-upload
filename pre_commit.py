@@ -1,3 +1,4 @@
+import contextlib
 import os
 from pathlib import Path
 
@@ -117,10 +118,8 @@ def setup():
 
     # Make executable (friendly for Linux/WSL/Git Bash)
     for hook in [PRE_COMMIT_HOOK, POST_COMMIT_HOOK]:
-        try:
+        with contextlib.suppress(BaseException):
             os.chmod(hook, 0o755)
-        except:
-            pass
 
     print("✅ Git hooks installed successfully!")
     print("Locked files: gofile.py, uc.py, viking.py")

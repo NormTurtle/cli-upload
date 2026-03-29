@@ -2,6 +2,7 @@
 import argparse
 import base64
 import concurrent.futures
+import contextlib
 import hashlib
 import http.client
 import json
@@ -223,10 +224,8 @@ def _upload_to_host(host, token, filepath, folder_id, chunk_size):
 
         return data
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
 
 def upload_file(filepath, folder_id, token, hosts, chunk_size, verbose=False):
@@ -293,10 +292,8 @@ def build_remote_folder_tree(token, root_folder_id, target_dir, set_public=None)
 def compute_total_size(target_path):
     total = 0
     for fp, _ in iter_upload_entries(target_path):
-        try:
+        with contextlib.suppress(FileNotFoundError):
             total += os.path.getsize(fp)
-        except FileNotFoundError:
-            pass
     return total
 
 
@@ -401,10 +398,7 @@ def main():
 
     fail_count = 0
     for filepath, root_dir in iter_upload_entries(target):
-        if os.path.isdir(target):
-            folder_id = remote_folder_map.get(root_dir)
-        else:
-            folder_id = root_id
+        folder_id = remote_folder_map.get(root_dir) if os.path.isdir(target) else root_id
 
         if not folder_id:
             log(f"Missing folder mapping for {filepath}")

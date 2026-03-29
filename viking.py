@@ -2,6 +2,7 @@
 import argparse
 import base64
 import concurrent.futures
+import contextlib
 import hashlib
 import http.client
 import json
@@ -186,10 +187,8 @@ def upload_chunk(url, path, offset, size, p_num):
                 time.sleep(min(2 * attempt, 10))
         finally:
             if conn:
-                try:
+                with contextlib.suppress(Exception):
                     conn.close()
-                except Exception:
-                    pass
     return None
 
 
@@ -333,9 +332,7 @@ def finalize_uploaded_file(res, rem_path, user_hash):
     if not isinstance(res, dict):
         return False
     file_hash = res.get("hash")
-    if rem_path and user_hash and not move_uploaded_file(file_hash, rem_path, user_hash):
-        return False
-    return True
+    return not (rem_path and user_hash and not move_uploaded_file(file_hash, rem_path, user_hash))
 
 
 def output_res(res, size, display_name):
@@ -378,9 +375,7 @@ def should_skip(path):
     base = os.path.basename(path)
     if base == LOG_FILE:
         return True
-    if ".viking_session" in base:
-        return True
-    return False
+    return ".viking_session" in base
 
 
 def iter_upload_entries(target_path):
