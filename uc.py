@@ -1490,6 +1490,12 @@ def process_folder(session, folder_path, dest_folder="", resume=True):
         skip_text=skip_str,
     )
 
+    # Eliminate folder_lock contention by sequentially ensuring all required unique
+    # remote folders exist *before* starting the massive multi-file concurrent upload.
+    unique_folders = {f[1] for f in to_upload if f[1]}
+    for remote_dir in unique_folders:
+        ensure_folder_exists(session, remote_dir)
+
     # Ensure thread pool is large enough for premium concurrency
     # Start Live display context IMMEDIATELY to show activity
     with (
