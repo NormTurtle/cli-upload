@@ -413,15 +413,24 @@ def compute_total_size(target_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("target", help="File or Folder")
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging output"
+    )
     parser.add_argument("--user", default=None, help="Your Viking user hash")
     parser.add_argument(
         "--public-upload-url",
         default=DEFAULT_PUBLIC_UPLOAD_URL,
         help="Public upload URL or token from /public-upload/<token>",
     )
-    parser.add_argument("--file-threads", type=int, default=FILE_THREADS)
-    parser.add_argument("--chunk-threads", type=int, default=CHUNK_THREADS)
+    parser.add_argument(
+        "--file-threads", type=int, default=FILE_THREADS, help="Number of concurrent file uploads"
+    )
+    parser.add_argument(
+        "--chunk-threads",
+        type=int,
+        default=CHUNK_THREADS,
+        help="Number of concurrent chunk uploads per file",
+    )
     parser.add_argument(
         "--chunked-folders",
         action="store_true",
@@ -434,7 +443,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    global LOG_FILE, KEY_FILE, RESUME_DIR
     LOG_FILE = args.log_file
     KEY_FILE = args.key_file
     RESUME_DIR = args.resume_dir or tempfile.gettempdir()
