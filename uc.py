@@ -778,6 +778,8 @@ class _MultipartStream:
         self._file_size = file_size
         self._filename = filename
         self._bytes_read = 0
+        # Buffer progress to reduce lock contention
+        self._progress_buffer = 0
 
     def read(self, n=-1):
         """Read n bytes across parts, updating progress for file content bytes."""
@@ -786,7 +788,11 @@ class _MultipartStream:
             self._idx = len(self._parts)
             file_bytes = max(0, len(result) - max(0, self._header_len - self._bytes_read))
             if file_bytes > 0:
-                add_progress(self._filename, min(file_bytes, self._file_size))
+                prog = min(file_bytes, self._file_size)
+                self._progress_buffer += prog
+                if self._progress_buffer >= 512 * 1024:
+                    add_progress(self._filename, self._progress_buffer)
+                    self._progress_buffer = 0
             self._bytes_read += len(result)
             return result
 
@@ -804,7 +810,10 @@ class _MultipartStream:
                 file_end = self._header_len + self._file_size
                 prog = max(0, min(self._bytes_read, file_end) - max(before, file_start))
                 if prog > 0:
-                    add_progress(self._filename, prog)
+                    self._progress_buffer += prog
+                    if self._progress_buffer >= 512 * 1024:
+                        add_progress(self._filename, self._progress_buffer)
+                        self._progress_buffer = 0
             else:
                 self._idx += 1
         return result
@@ -823,11 +832,16 @@ class _MultipartStream:
             0,
             min(self._bytes_read, self._header_len + self._file_size) - self._header_len,
         )
-        if file_progress_reported > 0:
-            add_progress(self._filename, -file_progress_reported)
+        reported = max(0, file_progress_reported - self._progress_buffer)
+        if reported > 0:
+            add_progress(self._filename, -reported)
         self._bytes_read = 0
+        self._progress_buffer = 0
 
     def close(self):
+        if self._progress_buffer > 0:
+            add_progress(self._filename, self._progress_buffer)
+            self._progress_buffer = 0
         for p in self._parts:
             with contextlib.suppress(Exception):
                 p.close()
