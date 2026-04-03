@@ -1,0 +1,4 @@
+## 2024-04-03 - Mask API Key Terminal Input
+**Vulnerability:** The CLI script `uc.py` collected sensitive API keys using the built-in `input()` function, causing the API key to echo in plaintext on the terminal, making it susceptible to shoulder surfing or terminal history exposure.
+**Learning:** Terminal inputs for sensitive data (API keys, passwords, hashes) must be explicitly masked because default input collection echos characters to stdout. Furthermore, using `getpass` can break automated integration tests that interact with CLI scripts via subprocess unless explicitly handled.
+**Prevention:** Always use the `getpass.getpass()` module to collect sensitive CLI inputs. Ensure automated integration testing scripts are updated to pass `input='\n'` to bypass `getpass` prompts without hanging.

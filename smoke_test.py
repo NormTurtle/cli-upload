@@ -18,7 +18,7 @@ def test_host(name, script):
     try:
         # Run the script with the dummy file
         result = subprocess.run(
-            ["python", script, DUMMY_FILE], capture_output=True, text=True, timeout=120
+            ["python", script, DUMMY_FILE], capture_output=True, text=True, timeout=120, input="\n"
         )
         elapsed = time.time() - start_time
 
