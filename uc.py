@@ -778,6 +778,7 @@ class _MultipartStream:
         self._file_size = file_size
         self._filename = filename
         self._bytes_read = 0
+        self._unreported_progress = 0
 
     def read(self, n=-1):
         """Read n bytes across parts, updating progress for file content bytes."""
@@ -786,8 +787,11 @@ class _MultipartStream:
             self._idx = len(self._parts)
             file_bytes = max(0, len(result) - max(0, self._header_len - self._bytes_read))
             if file_bytes > 0:
-                add_progress(self._filename, min(file_bytes, self._file_size))
+                self._unreported_progress += min(file_bytes, self._file_size)
             self._bytes_read += len(result)
+            if self._unreported_progress > 0:
+                add_progress(self._filename, self._unreported_progress)
+                self._unreported_progress = 0
             return result
 
         result = b""
@@ -804,9 +808,15 @@ class _MultipartStream:
                 file_end = self._header_len + self._file_size
                 prog = max(0, min(self._bytes_read, file_end) - max(before, file_start))
                 if prog > 0:
-                    add_progress(self._filename, prog)
+                    self._unreported_progress += prog
+                    if self._unreported_progress >= 1024 * 1024:
+                        add_progress(self._filename, self._unreported_progress)
+                        self._unreported_progress = 0
             else:
                 self._idx += 1
+                if self._unreported_progress > 0:
+                    add_progress(self._filename, self._unreported_progress)
+                    self._unreported_progress = 0
         return result
 
     def __len__(self):
@@ -819,15 +829,20 @@ class _MultipartStream:
             p.seek(0)
         self._idx = 0
         # undo previously reported progress so retries don't double-count
-        file_progress_reported = max(
+        file_progress_read = max(
             0,
             min(self._bytes_read, self._header_len + self._file_size) - self._header_len,
         )
+        file_progress_reported = file_progress_read - self._unreported_progress
         if file_progress_reported > 0:
             add_progress(self._filename, -file_progress_reported)
         self._bytes_read = 0
+        self._unreported_progress = 0
 
     def close(self):
+        if self._unreported_progress > 0:
+            add_progress(self._filename, self._unreported_progress)
+            self._unreported_progress = 0
         for p in self._parts:
             with contextlib.suppress(Exception):
                 p.close()
