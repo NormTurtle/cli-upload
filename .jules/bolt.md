@@ -1,0 +1,3 @@
+## 2024-05-24 - Buffered Progress Tracking Lock Contention
+**Learning:** Acquiring a global progress lock on every single small chunk read (e.g., 8KB via requests) during threaded file uploads creates massive lock contention, severely degrading parallel upload performance. When buffering progress updates, stream rollback logic (e.g., in seek()) must account for un-flushed local buffers to avoid sending negative progress to the global tracker upon retries.
+**Action:** Buffer progress updates locally within the upload stream (e.g., `_MultipartStream`), flushing only when a significant threshold (like 512KB) is reached or the stream is closed, and correctly subtract un-flushed amounts during retries.
