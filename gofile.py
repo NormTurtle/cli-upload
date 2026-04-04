@@ -316,7 +316,7 @@ def normalize_hosts(primary_host, include_fallbacks):
 
 
 def main():
-    global start_time
+    global start_time, LOG_FILE, KEY_FILE, RESUME_DIR
 
     parser = argparse.ArgumentParser(description="Upload file/folder to GoFile")
     parser.add_argument("target", help="File or folder to upload")
@@ -328,15 +328,15 @@ def main():
         action="store_true",
         help="Try other GoFile regional upload hosts if primary host fails",
     )
-    parser.add_argument("--file-threads", type=int, default=DEFAULT_FILE_THREADS)
-    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument("--file-threads", type=int, default=DEFAULT_FILE_THREADS, help="Number of files to upload concurrently")
+    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help="Size of each upload chunk in bytes")
     parser.add_argument(
         "--public",
         choices=["inherit", "true", "false"],
         default="inherit",
         help="Set created folders public/private, or inherit from parent",
     )
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--key-file", default=KEY_FILE, help="Path to API key file")
     parser.add_argument("--log-file", default=LOG_FILE, help="Path to log file")
     parser.add_argument(
@@ -344,7 +344,6 @@ def main():
     )
     args = parser.parse_args()
 
-    global LOG_FILE, KEY_FILE, RESUME_DIR
     LOG_FILE = args.log_file
     KEY_FILE = args.key_file
     RESUME_DIR = args.resume_dir or tempfile.gettempdir()
