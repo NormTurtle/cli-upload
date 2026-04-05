@@ -1490,6 +1490,12 @@ def process_folder(session, folder_path, dest_folder="", resume=True):
         skip_text=skip_str,
     )
 
+    # Performance: Pre-create all unique folders sequentially before starting
+    # concurrent workers to eliminate lock contention on ensure_folder_exists.
+    unique_folders = {f[1] for f in to_upload if f[1]}
+    for folder_name in unique_folders:
+        ensure_folder_exists(session, folder_name)
+
     # Ensure thread pool is large enough for premium concurrency
     # Start Live display context IMMEDIATELY to show activity
     with (
